@@ -25,7 +25,8 @@ jobs:
 
       - name: Render challenge.html preview
         run: |
-          npx --yes playwright install --with-deps chromium
+          npm install playwright
+          npx playwright install --with-deps chromium
           node .github/scripts/render-challenge.js "${{ inputs.challenge_path }}" /tmp/challenge-preview.png
 
       - name: Comment on PR with preview

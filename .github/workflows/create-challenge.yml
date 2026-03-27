@@ -102,7 +102,8 @@ jobs:
             exit 0
           fi
           echo "Rendering $CHALLENGE_HTML"
-          npx --yes playwright install --with-deps chromium
+          npm install playwright
+          npx playwright install --with-deps chromium
           node .github/scripts/render-challenge.js "$CHALLENGE_HTML" /tmp/challenge-preview.png
           echo "challenge_html=$CHALLENGE_HTML" >> "$GITHUB_ENV"
 
