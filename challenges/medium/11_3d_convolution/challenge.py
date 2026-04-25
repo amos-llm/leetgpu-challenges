@@ -4,6 +4,9 @@ from typing import Any, Dict, List
 import torch
 from core.challenge_base import ChallengeBase
 
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+
 
 class Challenge(ChallengeBase):
     def __init__(self):
