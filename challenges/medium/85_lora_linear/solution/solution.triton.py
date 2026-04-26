@@ -68,7 +68,7 @@ def lora_kernel(
     )
     acc0 += scale * tl.dot(acc1, tl.trans(b), allow_tf32=False)
 
-    mask_y = (offs_m[:, None] < M) * (offs_n[None, :] < N)
+    mask_y = (offs_m[:, None] < M) & (offs_n[None, :] < N)
     tl.store(output + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on, acc0, mask=mask_y)
 
 
