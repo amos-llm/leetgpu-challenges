@@ -55,4 +55,5 @@ extern "C" void solve(float* Q, float* cos, float* sin, float* output, int M, in
     constexpr int kItemsPerBlock = kBlockSize * kItemsPerThread;
     dim3 grid_size(M, (D / 2 + kItemsPerBlock - 1) / kItemsPerBlock);
     rope_kernel<kBlockSize, kItemsPerThread><<<grid_size, kBlockSize>>>(Q, cos, sin, output, M, D);
+    cudaDeviceSynchronize();
 }
