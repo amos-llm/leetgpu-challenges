@@ -49,7 +49,7 @@ def int8_gemm_kernel(
         mask_b = (offs_k[:, None] < K) & (offs_n[None, :] < N)
         block_a = tl.load(ptrs_a, mask=mask_a, other=0)
         block_b = tl.load(ptrs_b, mask=mask_b, other=0)
-        acc = tl.dot(block_a, block_b, acc, out_dtype=tl.int32)
+        acc = tl.dot(block_a, block_b, acc, out_dtype=tl.int32, allow_tf32=False)
         sum_a += tl.sum(block_a, axis=1)
         sum_b += tl.sum(block_b, axis=0)
 
