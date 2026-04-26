@@ -68,8 +68,8 @@ def int4_matmul_kernel(
         tile_w1 = (((tile_wq & 0xF0) >> 4).to(tl.float32) - 8.0) * tile_s
         tile_w2 = ((tile_wq & 0x0F).to(tl.float32) - 8.0) * tile_s
 
-        acc = tl.dot(tile_x1, tl.trans(tile_w1), acc=acc, input_precision="ieee")
-        acc = tl.dot(tile_x2, tl.trans(tile_w2), acc=acc, input_precision="ieee")
+        acc = tl.dot(tile_x1, tl.trans(tile_w1), acc=acc, input_precision="ieee", allow_tf32=False)
+        acc = tl.dot(tile_x2, tl.trans(tile_w2), acc=acc, input_precision="ieee", allow_tf32=False)
 
     mask_y = (offs_m[:, None] < M) & (offs_n[None, :] < N)
     tl.store(
