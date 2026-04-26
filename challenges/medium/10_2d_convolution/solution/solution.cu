@@ -50,4 +50,5 @@ extern "C" void solve(const float* input, const float* kernel, float* output, in
     int smem_size = smem_rows * smem_cols * sizeof(float);
     conv2d_kernel<<<grid_size, block_size, smem_size>>>(input, kernel, output, input_rows,
                                                         input_cols, kernel_rows, kernel_cols);
+    cudaDeviceSynchronize();
 }
