@@ -1,16 +1,16 @@
-#include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
-template <int BlockRows, int BlockCols, int MaxKernelRows, int MaxKernelCols>
 __global__ void conv2d_kernel(const float* input, const float* kernel, float* output,
                               int input_rows, int input_cols, int kernel_rows, int kernel_cols) {
-    __shared__ float shared_input[BlockRows + MaxKernelRows][BlockCols + MaxKernelCols];
-    for (int i = threadIdx.y; i < BlockRows + MaxKernelRows; i += blockDim.y) {
-        for (int j = threadIdx.x; j < BlockCols + MaxKernelCols; j += blockDim.x) {
+    extern __shared__ float smem_input[];
+    int smem_cols = blockDim.x + kernel_cols - 1;
+    int smem_rows = blockDim.y + kernel_rows - 1;
+    for (int i = threadIdx.y; i < smem_rows; i += blockDim.y) {
+        for (int j = threadIdx.x; j < smem_cols; j += blockDim.x) {
             int row = blockIdx.y * blockDim.y + i;
             int col = blockIdx.x * blockDim.x + j;
             if (row < input_rows && col < input_cols) {
-                shared_input[i][j] = input[row * input_cols + col];
+                smem_input[i * smem_cols + j] = input[row * input_cols + col];
             }
         }
     }
@@ -28,7 +28,8 @@ __global__ void conv2d_kernel(const float* input, const float* kernel, float* ou
     float sum = 0.0f;
     for (int i = 0; i < kernel_rows; ++i) {
         for (int j = 0; j < kernel_cols; ++j) {
-            sum += shared_input[threadIdx.y + i][threadIdx.x + j] * kernel[i * kernel_cols + j];
+            sum += smem_input[(threadIdx.y + i) * smem_cols + threadIdx.x + j] *
+                   kernel[i * kernel_cols + j];
         }
     }
     output[global_row * output_cols + global_col] = sum;
@@ -37,18 +38,16 @@ __global__ void conv2d_kernel(const float* input, const float* kernel, float* ou
 // input, kernel, output are device pointers
 extern "C" void solve(const float* input, const float* kernel, float* output, int input_rows,
                       int input_cols, int kernel_rows, int kernel_cols) {
-    constexpr int kBlockRows = 16;
-    constexpr int kBlockCols = 16;
-    constexpr int kMaxKernelRows = 15;
-    constexpr int kMaxKernelCols = 15;
-    int output_rows = input_rows - kernel_rows + 1;
+    constexpr int kBlockCols = 8;
+    constexpr int kBlockRows = 8;
     int output_cols = input_cols - kernel_cols + 1;
+    int output_rows = input_rows - kernel_rows + 1;
     dim3 block_size(kBlockCols, kBlockRows);
     dim3 grid_size((output_cols + kBlockCols - 1) / kBlockCols,
                    (output_rows + kBlockRows - 1) / kBlockRows);
-    int shmem_size =
-        (kBlockRows + kernel_rows - 1) * (kBlockCols + kernel_cols - 1) * sizeof(float);
-    conv2d_kernel<kBlockRows, kBlockCols, kMaxKernelRows, kMaxKernelCols>
-        <<<grid_size, block_size>>>(input, kernel, output, input_rows, input_cols, kernel_rows,
-                                    kernel_cols);
+    int smem_cols = kBlockCols + kernel_cols - 1;
+    int smem_rows = kBlockRows + kernel_rows - 1;
+    int smem_size = smem_rows * smem_cols * sizeof(float);
+    conv2d_kernel<<<grid_size, block_size, smem_size>>>(input, kernel, output, input_rows,
+                                                        input_cols, kernel_rows, kernel_cols);
 }
