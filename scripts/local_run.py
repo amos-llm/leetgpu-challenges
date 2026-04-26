@@ -49,6 +49,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # ANSI color codes
 GREEN = "\033[92m"
 RED = "\033[91m"
+YELLOW = "\033[93m"
 RESET = "\033[0m"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
@@ -1007,24 +1008,19 @@ def run_all_challenges(
                 logger.error("Unsupported framework: %s", framework)
                 return 2
 
-        if skipped_dirs:
-            skipped_labels = [f"{d.parent.name}/{d.name}" for d in skipped_dirs]
-            logger.info(
-                "Skipping %d challenges without '%s' solution: %s",
-                len(skipped_dirs),
-                framework,
-                ", ".join(skipped_labels),
-            )
-
         # Compute a consistent label column width for aligned summary output.
         label_width = 0
         if args.summary:
             try:
-                label_width = (
-                    max(len(f"{d.parent.name}/{d.name}") for d in valid_dirs) if valid_dirs else 0
-                )
+                all_labels = [f"{d.parent.name}/{d.name}" for d in (valid_dirs + skipped_dirs)]
+                label_width = max(len(name) for name in all_labels) if all_labels else 0
             except Exception:
                 label_width = 0
+
+        if skipped_dirs:
+            skipped_labels = [f"{d.parent.name}/{d.name}" for d in skipped_dirs]
+            for label in skipped_labels:
+                logger.info("%-*s | %sSKIPPED%s", label_width, label, YELLOW, RESET)
 
         for ch in valid_dirs:
             total_run += 1
