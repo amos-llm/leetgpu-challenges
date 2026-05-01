@@ -28,37 +28,36 @@ def attn_kernel(
     offs_m = pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_d = tl.arange(0, BLOCK_SIZE_D)
 
-    row_max = tl.full((BLOCK_SIZE_M, 1), float("-inf"), dtype=tl.float32)
-    sum_exp = tl.zeros((BLOCK_SIZE_M, 1), dtype=tl.float32)
+    row_max = tl.full((BLOCK_SIZE_M,), float("-inf"), dtype=tl.float32)
+    row_sum = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_D), dtype=tl.float32)
     mask_qo = (offs_m[:, None] < M) & (offs_d[None, :] < d)
     q = tl.load(
         Q + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd, mask=mask_qo, other=0.0
     )
-    scale_d = tl.rsqrt(tl.cast(d, tl.float32))
     for i in range(0, N, BLOCK_SIZE_N):
         offs_n = i + tl.arange(0, BLOCK_SIZE_N)
         mask_kv = (offs_n[:, None] < N) & (offs_d[None, :] < d)
         k = tl.load(
             K + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kd, mask=mask_kv, other=0.0
         )
-        qk = tl.dot(q, tl.trans(k), allow_tf32=False)
-        qk *= scale_d
-        qk = tl.where(offs_n[None, :] < N, qk, float("-inf"))
+        s = tl.dot(q, tl.trans(k), allow_tf32=False)
+        s *= tl.rsqrt(tl.cast(d, tl.float32))
+        s = tl.where(offs_n[None, :] < N, s, float("-inf"))
 
-        row_max_new = tl.maximum(row_max, tl.max(qk, axis=1, keep_dims=True))
+        row_max_new = tl.maximum(row_max, tl.max(s, axis=1))
         alpha = tl.exp(row_max - row_max_new)
 
-        p = tl.exp(qk - row_max_new)
+        p = tl.exp(s - row_max_new[:, None])
         v = tl.load(
             V + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vd, mask=mask_kv, other=0.0
         )
-        acc = acc * alpha + tl.dot(p, v, allow_tf32=False)
+        acc = acc * alpha[:, None] + tl.dot(p, v, allow_tf32=False)
 
-        sum_exp = sum_exp * alpha + tl.sum(p, axis=1, keep_dims=True)
+        row_sum = row_sum * alpha + tl.sum(p, axis=1)
         row_max = row_max_new
 
-    acc /= sum_exp
+    acc /= row_sum[:, None]
     tl.store(output + offs_m[:, None] * stride_om + offs_d[None, :] * stride_od, acc, mask=mask_qo)
 
 
