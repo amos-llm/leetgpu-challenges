@@ -20,9 +20,9 @@ def solve(input: torch.Tensor, output: torch.Tensor, N: int, k: int):
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(N, BLOCK_SIZE)
     grid = (num_blocks,)
-    block_topk = input.new_empty((num_blocks, triton.next_power_of_2(k)))
-    topk_kernel[grid](input, block_topk, N, triton.next_power_of_2(k), BLOCK_SIZE)
     if num_blocks > 1:
+        block_topk = input.new_empty((num_blocks, triton.next_power_of_2(k)))
+        topk_kernel[grid](input, block_topk, N, triton.next_power_of_2(k), BLOCK_SIZE)
         solve(block_topk, output, block_topk.numel(), k)
     else:
-        output[:k].copy_(block_topk[0, :k])
+        topk_kernel[grid](input, output, N, triton.next_power_of_2(k), BLOCK_SIZE)
