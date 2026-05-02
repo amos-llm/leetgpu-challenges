@@ -1,7 +1,6 @@
 import torch
 import triton
 import triton.language as tl
-from triton.language.extra import libdevice
 
 
 @triton.jit
@@ -35,7 +34,8 @@ def attn_kernel(
         other=0.0,
     )
 
-    scale_d = tl.rsqrt(tl.cast(d_model, tl.float32))
+    sm_scale = tl.rsqrt(tl.cast(d_model, tl.float32))
+    log_gamma = tl.log(gamma)
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_D), dtype=tl.float32)
     for n in range(0, seq_len, BLOCK_SIZE_N):
         offs_n = n + tl.arange(0, BLOCK_SIZE_N)
@@ -46,9 +46,9 @@ def attn_kernel(
             other=0.0,
         )
         s = tl.dot(q, tl.trans(k), allow_tf32=False)
-        s *= scale_d
+        s *= sm_scale
 
-        decay_mask = libdevice.pow(gamma, offs_m[:, None] - offs_n[None, :])
+        decay_mask = tl.exp((offs_m[:, None] - offs_n[None, :]) * log_gamma)
         s *= decay_mask
 
         causal_mask = offs_m[:, None] >= offs_n[None, :]
