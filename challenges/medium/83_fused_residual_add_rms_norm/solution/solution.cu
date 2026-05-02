@@ -37,7 +37,9 @@ __global__ void rms_norm_kernel(const float* x, float* residual, const float* we
 
 #pragma unroll
     for (int i = 0; i < ItemsPerThread; i++) {
-        z_items[i] *= rrms * weight[threadIdx.x * ItemsPerThread + i];
+        if (threadIdx.x * ItemsPerThread + i < C) {
+            z_items[i] *= rrms * weight[threadIdx.x * ItemsPerThread + i];
+        }
     }
     BlockStore(temp_storage.store).Store(out + blockIdx.x * C, z_items, C);
 }
@@ -50,4 +52,5 @@ extern "C" void solve(const float* x, float* residual, const float* weight, floa
     constexpr int kItemsPerBlock = kBlockSize * kItemsPerThread;
     rms_norm_kernel<kBlockSize, kItemsPerThread>
         <<<N, kBlockSize>>>(x, residual, weight, out, N, C, eps);
+    cudaDeviceSynchronize();
 }
