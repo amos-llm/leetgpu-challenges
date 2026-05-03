@@ -231,6 +231,24 @@ def run_python_solution(
             # if jax or dlpack not available, continue and let caller see any errors
             pass
 
+    # For CuteDSL, convert torch tensors to cute tensors
+    cute_tensor_map = {}
+    if framework == "cute":
+        try:
+            from cutlass.cute.runtime import from_dlpack
+
+            new_params = {}
+            for k, v in params.items():
+                if hasattr(v, "dtype") and str(v.device).startswith("cuda"):
+                    cute_v = from_dlpack(v)
+                    new_params[k] = cute_v
+                    cute_tensor_map[id(cute_v)] = v
+                else:
+                    new_params[k] = v
+            params = new_params
+        except Exception:
+            pass
+
     # Call solve with matched signature order
     ordered_args = map_params_to_signature(solve, params)
     ret = solve(*ordered_args)
@@ -264,6 +282,12 @@ def run_python_solution(
             # best-effort: assume last arg is output
             result_key = list(test_case.keys())[-1]
             result[result_key] = ordered_args[-1]
+
+    # For CuteDSL, map cute tensors back to original torch tensors for comparison
+    if framework == "cute" and cute_tensor_map:
+        for k, v in list(result.items()):
+            if id(v) in cute_tensor_map:
+                result[k] = cute_tensor_map[id(v)]
 
     return result, ret
 
