@@ -1,9 +1,8 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
-#include <thrust/device_vector.h>
 
 template <int BlockSize, int ItemsPerThread>
-__global__ void scan_block(const float* input, float* output, float* block_sum, int N) {
+__global__ void local_scan_kernel(const float* input, float* output, float* block_sum, int N) {
     using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
     using BlockStore =
         cub::BlockStore<float, BlockSize, ItemsPerThread, cub::BLOCK_STORE_VECTORIZE>;
@@ -19,8 +18,7 @@ __global__ void scan_block(const float* input, float* output, float* block_sum, 
     int block_offset = blockIdx.x * BlockSize * ItemsPerThread;
     BlockLoad(temp_storage.load).Load(input + block_offset, items, N - block_offset, 0.0f);
     float sum = 0.0f;
-    BlockScan(temp_storage.scan).InclusiveScan(items, items, cuda::std::plus<float>(), sum);
-    __syncthreads();
+    BlockScan(temp_storage.scan).InclusiveScan(items, items, thrust::plus<float>(), sum);
     BlockStore(temp_storage.store).Store(output + block_offset, items, N - block_offset);
     if (threadIdx.x == 0) {
         block_sum[blockIdx.x] = sum;
@@ -28,7 +26,7 @@ __global__ void scan_block(const float* input, float* output, float* block_sum, 
 }
 
 template <int BlockSize, int ItemsPerThread>
-__global__ void add_offset(const float* input, const float* offset, float* output, int N) {
+__global__ void add_offset_kernel(const float* input, const float* offset, float* output, int N) {
     using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
     using BlockStore =
         cub::BlockStore<float, BlockSize, ItemsPerThread, cub::BLOCK_STORE_VECTORIZE>;
@@ -57,16 +55,15 @@ extern "C" void solve(const float* input, float* output, int N) {
     constexpr int kItemsPerThread = 4;
     constexpr int kItemsPerBlock = kBlockSize * kItemsPerThread;
     int grid_size = (N + kItemsPerBlock - 1) / kItemsPerBlock;
-    thrust::device_vector<float> d_block_sum(grid_size, 0.0f);
-    float* d_block_sum_ptr = thrust::raw_pointer_cast(d_block_sum.data());
-    scan_block<kBlockSize, kItemsPerThread>
-        <<<grid_size, kBlockSize>>>(input, output, d_block_sum_ptr, N);
-
+    float* d_block_sum;
+    cudaMalloc(&d_block_sum, grid_size * sizeof(float));
+    local_scan_kernel<kBlockSize, kItemsPerThread>
+        <<<grid_size, kBlockSize>>>(input, output, d_block_sum, N);
     if (grid_size > 1) {
-        solve(d_block_sum_ptr, d_block_sum_ptr, grid_size);
+        solve(d_block_sum, d_block_sum, grid_size);
     }
-
-    add_offset<kBlockSize, kItemsPerThread>
-        <<<grid_size, kBlockSize>>>(output, d_block_sum_ptr, output, N);
+    add_offset_kernel<kBlockSize, kItemsPerThread>
+        <<<grid_size, kBlockSize>>>(output, d_block_sum, output, N);
     cudaDeviceSynchronize();
+    cudaFree(d_block_sum);
 }
