@@ -1,73 +1,55 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
-template <int BlockSize, int ItemsPerThread>
-__global__ void softmax_kernel(const float* input, float* output, int N) {
-    struct RowStats {
+template <int BlockSize> __global__ void softmax_kernel(const float* input, float* output, int N) {
+    struct MaxSum {
         float max;
         float sum;
     };
 
-    using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
-    using BlockStore =
-        cub::BlockStore<float, BlockSize, ItemsPerThread, cub::BLOCK_STORE_VECTORIZE>;
-    using BlockReduce = cub::BlockReduce<RowStats, BlockSize>;
-
-    __shared__ union {
-        typename BlockLoad::TempStorage load;
-        typename BlockStore::TempStorage store;
-        typename BlockReduce::TempStorage reduce;
-    } temp_storage;
-
-    RowStats stats = {-1e38f, 0.0f};
-    float items[ItemsPerThread];
-
-    for (int offset = 0; offset < N; offset += BlockSize * ItemsPerThread) {
-        BlockLoad(temp_storage.load).Load(input + offset, items, N - offset);
-#pragma unroll
-        for (int i = 0; i < ItemsPerThread; ++i) {
-            int idx = offset + threadIdx.x * ItemsPerThread + i;
-            if (idx < N) {
-                float val = items[i];
-                float max_new = fmaxf(stats.max, val);
-                stats.sum = stats.sum * __expf(stats.max - max_new) + __expf(val - max_new);
-                stats.max = max_new;
-            }
-        }
-    }
-
     struct ReduceOp {
-        __device__ __forceinline__ RowStats operator()(const RowStats& a, const RowStats& b) {
-            float max_new = fmaxf(a.max, b.max);
-            return {max_new, a.sum * __expf(a.max - max_new) + b.sum * __expf(b.max - max_new)};
+        __device__ MaxSum operator()(MaxSum a, MaxSum b) const {
+            float max = fmaxf(a.max, b.max);
+            return MaxSum{max, a.sum * expf(a.max - max) + b.sum * expf(b.max - max)};
         }
     };
 
-    RowStats reduced_stats = BlockReduce(temp_storage.reduce).Reduce(stats, ReduceOp());
+    using BlockReduce = cub::BlockReduce<MaxSum, BlockSize>;
 
+    __shared__ typename BlockReduce::TempStorage temp_storage;
+
+    MaxSum max_sum = {-1e38f, 0.0f};
+
+    for (int i = 0; i < N; i += BlockSize) {
+        int j = i + threadIdx.x;
+        if (j < N) {
+            float value = input[j];
+            float max = fmaxf(max_sum.max, value);
+            max_sum.sum = max_sum.sum * expf(max_sum.max - max) + expf(value - max);
+            max_sum.max = max;
+        }
+    }
+
+    MaxSum agg_max_sum = BlockReduce(temp_storage).Reduce(max_sum, ReduceOp());
     __shared__ float row_max;
     __shared__ float row_sum;
-
     if (threadIdx.x == 0) {
-        row_max = reduced_stats.max;
-        row_sum = reduced_stats.sum;
+        row_max = agg_max_sum.max;
+        row_sum = agg_max_sum.sum;
     }
     __syncthreads();
 
-    for (int offset = 0; offset < N; offset += BlockSize * ItemsPerThread) {
-        BlockLoad(temp_storage.load).Load(input + offset, items, N - offset);
-#pragma unroll
-        for (int i = 0; i < ItemsPerThread; ++i) {
-            items[i] = __expf(items[i] - row_max) / row_sum;
+    for (int i = 0; i < N; i += BlockSize) {
+        int j = i + threadIdx.x;
+        if (j < N) {
+            output[j] = expf(input[j] - row_max) / row_sum;
         }
-        BlockStore(temp_storage.store).Store(output + offset, items, N - offset);
     }
 }
 
 // input, output are device pointers (i.e. pointers to memory on the GPU)
 extern "C" void solve(const float* input, float* output, int N) {
-    constexpr int kBlockSize = 256;
-    constexpr int kItemsPerThread = 4;
-    softmax_kernel<kBlockSize, kItemsPerThread><<<1, kBlockSize>>>(input, output, N);
+    constexpr int kBlockSize = 1024;
+    softmax_kernel<kBlockSize><<<1, kBlockSize>>>(input, output, N);
     cudaDeviceSynchronize();
 }
