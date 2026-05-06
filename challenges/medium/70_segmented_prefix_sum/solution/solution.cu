@@ -48,7 +48,8 @@ __global__ void local_scan_kernel(const float* values, const int* flags, float* 
 
     FlagValue flag_value{flag, value};
     FlagValue agg_flag_value;
-    BlockScan(temp_storage.scan).InclusiveScan(flag_value, flag_value, ScanOp(), agg_flag_value);
+    BlockScan(temp_storage.scan)
+        .ExclusiveScan(flag_value, flag_value, FlagValue{0, 0.0f}, ScanOp(), agg_flag_value);
     if (idx < N) {
         prefix_sums[idx] = flag_value.value;
     }
@@ -87,7 +88,8 @@ __global__ void global_scan_kernel(const int* first_flag_indices, const float* l
     }
 
     IndexSum index_sum{index, sum};
-    BlockScan(temp_storage).InclusiveScan(index_sum, index_sum, ScanOp());
+    BlockScan(temp_storage)
+        .ExclusiveScan(index_sum, index_sum, IndexSum{BlockSize, 0.0f}, ScanOp());
     if (idx < N) {
         offsets[idx] = index_sum.sum;
     }
@@ -111,15 +113,13 @@ __global__ void add_offset_kernel(const int* flags, const float* prefix_sums,
     }
 
     float value = 0.0f;
-    if (threadIdx.x > 0 && flags[idx] != 1) {
-        value = prefix_sums[idx - 1];
+    if (flags[idx] != 1) {
+        value = prefix_sums[idx];
     }
 
-    if (blockIdx.x > 0) {
-        int first_flag_index = first_flag_indices[blockIdx.x];
-        if (threadIdx.x < first_flag_index) {
-            value += offsets[blockIdx.x - 1];
-        }
+    int first_flag_index = first_flag_indices[blockIdx.x];
+    if (threadIdx.x < first_flag_index) {
+        value += offsets[blockIdx.x];
     }
 
     output[idx] = value;
