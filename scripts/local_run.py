@@ -140,6 +140,7 @@ def find_solution_file(challenge_dir: Path, framework: str) -> Path:
         "triton": "solution.triton.py",
         "jax": "solution.jax.py",
         "cute": "solution.cute.py",
+        "tilelang": "solution.tilelang.py",
         "cuda": "solution.cu",
         "mojo": "solution.mojo",
     }
@@ -1170,10 +1171,10 @@ def main(argv: List[str] | None = None) -> int:
         "--framework",
         required=True,
         nargs="+",
-        choices=["pytorch", "triton", "jax", "cuda", "cute", "mojo"],
+        choices=["pytorch", "triton", "jax", "cuda", "cute", "tilelang", "mojo"],
         help=(
             "Framework(s) to run: provide one or more of "
-            "pytorch triton jax cuda cute mojo (space-separated)"
+            "pytorch triton jax cuda cute tilelang mojo (space-separated)"
         ),
     )
     parser.add_argument(
