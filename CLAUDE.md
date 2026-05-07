@@ -12,6 +12,7 @@ challenges/<difficulty>/<number>_<name>/
     ├── starter.jax.py
     ├── starter.mojo
     ├── starter.pytorch.py
+    ├── starter.tilelang.py
     └── starter.triton.py
 ```
 
@@ -134,6 +135,7 @@ Must compile/run without errors but not solve the problem. No comments except th
 - Triton: `challenges/easy/1_vector_add/starter/starter.triton.py`
 - JAX: `challenges/easy/1_vector_add/starter/starter.jax.py`
 - CuTe: `challenges/easy/1_vector_add/starter/starter.cute.py`
+- TileLang: `challenges/easy/1_vector_add/starter/starter.tilelang.py`
 - Mojo: `challenges/easy/1_vector_add/starter/starter.mojo`
 
 ### Parameter Description Comment
@@ -158,7 +160,7 @@ Each starter file must have exactly one comment describing the parameters, place
 1. Create directory: `mkdir -p challenges/<difficulty>/<number>_<name>/starter`
 2. Write `challenge.py` — inherit ChallengeBase, implement all 6 methods
 3. Write `challenge.html` — all 4 sections
-4. Write starter code for all 6 frameworks
+4. Write starter code for all 7 frameworks
 5. Lint: `pre-commit run --all-files`
 
 ## Testing with `run_challenge.py`
@@ -197,7 +199,7 @@ Verify every item before submitting. This is the single source of truth — work
 - [ ] `generate_performance_test` fits 5x in 16GB VRAM (Tesla T4)
 
 ### Starter files
-- [ ] All 6 files present: `.cu`, `.pytorch.py`, `.triton.py`, `.jax.py`, `.cute.py`, `.mojo`
+- [ ] All 7 files present: `.cu`, `.pytorch.py`, `.triton.py`, `.jax.py`, `.cute.py`, `.tilelang.py`, `.mojo`
 - [ ] Exactly 1 parameter description comment per file, no other comments
 - [ ] CUDA/Mojo use "device pointers"; easy challenges include `(i.e. pointers to memory on the GPU)`, medium/hard omit it
 - [ ] PyTorch/Triton/CuTe use "tensors on the GPU"; JAX uses "tensors on device" and also has `# return output tensor directly`
