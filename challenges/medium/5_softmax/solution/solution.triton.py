@@ -4,40 +4,39 @@ import triton.language as tl
 
 
 @triton.jit
-def softmax_kernel(input, output, N, BLOCK_SIZE: tl.constexpr):
-    m_i = float("-inf")
-    l_i = 0.0
+def softmax_kernel_stage1(input, partial_maxs, partial_sums, N, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    x = tl.load(input + offs, mask=offs < N, other=float("-inf"))
+    partial_max = tl.max(x)
+    partial_sum = tl.sum(tl.exp(x - partial_max))
+    tl.store(partial_maxs + pid, partial_max)
+    tl.store(partial_sums + pid, partial_sum)
 
-    offs = tl.arange(0, BLOCK_SIZE)
-    ptrs_in = input + offs
-    for _ in range(0, N, BLOCK_SIZE):
-        mask = offs < N
-        block = tl.load(ptrs_in, mask=mask, other=float("-inf"))
-        m_j = tl.max(block, axis=0)
-        m_new = tl.maximum(m_i, m_j)
-        l_i = l_i * tl.exp(m_i - m_new) + tl.sum(tl.exp(block - m_new), axis=0)
-        m_i = m_new
 
-        offs += BLOCK_SIZE
-        ptrs_in += BLOCK_SIZE
-
-    offs = tl.arange(0, BLOCK_SIZE)
-    ptrs_in = input + offs
-    ptrs_out = output + offs
-    for _ in range(0, N, BLOCK_SIZE):
-        mask = offs < N
-        block = tl.load(ptrs_in, mask=mask, other=float("-inf"))
-        block = tl.exp(block - m_i) / l_i
-        tl.store(ptrs_out, block, mask=mask)
-
-        offs += BLOCK_SIZE
-        ptrs_in += BLOCK_SIZE
-        ptrs_out += BLOCK_SIZE
+@triton.jit
+def softmax_kernel_stage2(input, partial_maxs, partial_sums, output, N, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+    partial_offs = tl.arange(0, BLOCK_SIZE)
+    block_max = tl.load(
+        partial_maxs + partial_offs, mask=partial_offs < num_programs, other=float("-inf")
+    )
+    block_sum = tl.load(partial_sums + partial_offs, mask=partial_offs < num_programs, other=0.0)
+    row_max = tl.max(block_max)
+    row_sum = tl.sum(block_sum * tl.exp(block_max - row_max))
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < N
+    x = tl.load(input + offs, mask=mask, other=0.0)
+    y = tl.exp(x - row_max) / row_sum
+    tl.store(output + offs, y, mask=mask)
 
 
 # input, output are tensors on the GPU
 def solve(input: torch.Tensor, output: torch.Tensor, N: int):
     BLOCK_SIZE = 1024
-    grid = (1,)
-
-    softmax_kernel[grid](input, output, N, BLOCK_SIZE)
+    grid = (triton.cdiv(N, BLOCK_SIZE),)
+    partial_maxs = input.new_empty(grid)
+    partial_sums = input.new_empty(grid)
+    softmax_kernel_stage1[grid](input, partial_maxs, partial_sums, N, BLOCK_SIZE)
+    softmax_kernel_stage2[grid](input, partial_maxs, partial_sums, output, N, BLOCK_SIZE)
