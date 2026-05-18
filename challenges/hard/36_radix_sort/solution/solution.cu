@@ -1,38 +1,38 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
-template <unsigned int NumBins>
+template <unsigned int kNumBins>
 __global__ void histogram_kernel(const unsigned int* input, unsigned int* block_histograms, int N,
                                  unsigned int shift_bits) {
-    __shared__ unsigned int s_histograms[NumBins];
+    __shared__ unsigned int s_histograms[kNumBins];
 
-    for (int i = threadIdx.x; i < NumBins; i += blockDim.x) {
+    for (int i = threadIdx.x; i < kNumBins; i += blockDim.x) {
         s_histograms[i] = 0;
     }
     __syncthreads();
 
     int input_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (input_idx < N) {
-        unsigned int bin = (input[input_idx] >> shift_bits) & (NumBins - 1);
+        unsigned int bin = (input[input_idx] >> shift_bits) & (kNumBins - 1);
         atomicAdd(&s_histograms[bin], 1);
     }
     __syncthreads();
 
-    for (int i = threadIdx.x; i < NumBins; i += blockDim.x) {
+    for (int i = threadIdx.x; i < kNumBins; i += blockDim.x) {
         block_histograms[i * gridDim.x + blockIdx.x] = s_histograms[i];
     }
 }
 
-template <int BlockSize, unsigned int NumBins>
+template <int kBlockSize, unsigned int kNumBins>
 __global__ void scatter_kernel(const unsigned int* input, const unsigned int* block_bin_offsets,
                                unsigned int* output, int N, unsigned int shift_bits) {
-    using BlockScan = cub::BlockScan<int, BlockSize>;
+    using BlockScan = cub::BlockScan<int, kBlockSize>;
     __shared__ typename BlockScan::TempStorage temp_storage;
 
-    int input_idx = blockIdx.x * BlockSize + threadIdx.x;
+    int input_idx = blockIdx.x * kBlockSize + threadIdx.x;
     if (input_idx < N) {
-        unsigned int bin = (input[input_idx] >> shift_bits) & (NumBins - 1);
-        for (int i = 0; i < NumBins; ++i) {
+        unsigned int bin = (input[input_idx] >> shift_bits) & (kNumBins - 1);
+        for (int i = 0; i < kNumBins; ++i) {
             int is_in_bin = 0;
             if (i == bin) {
                 is_in_bin = 1;

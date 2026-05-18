@@ -1,7 +1,7 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
-template <int BlockSize> __global__ void softmax_kernel(const float* input, float* output, int N) {
+template <int kBlockSize> __global__ void softmax_kernel(const float* input, float* output, int N) {
     struct MaxSum {
         float max;
         float sum;
@@ -14,13 +14,13 @@ template <int BlockSize> __global__ void softmax_kernel(const float* input, floa
         }
     };
 
-    using BlockReduce = cub::BlockReduce<MaxSum, BlockSize>;
+    using BlockReduce = cub::BlockReduce<MaxSum, kBlockSize>;
 
     __shared__ typename BlockReduce::TempStorage temp_storage;
 
     MaxSum max_sum = {-1e38f, 0.0f};
 
-    for (int i = 0; i < N; i += BlockSize) {
+    for (int i = 0; i < N; i += kBlockSize) {
         int j = i + threadIdx.x;
         if (j < N) {
             float value = input[j];
@@ -39,7 +39,7 @@ template <int BlockSize> __global__ void softmax_kernel(const float* input, floa
     }
     __syncthreads();
 
-    for (int i = 0; i < N; i += BlockSize) {
+    for (int i = 0; i < N; i += kBlockSize) {
         int j = i + threadIdx.x;
         if (j < N) {
             output[j] = expf(input[j] - row_max) / row_sum;
