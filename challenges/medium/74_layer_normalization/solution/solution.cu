@@ -7,13 +7,13 @@ struct ReduceOp {
     }
 };
 
-template <int BlockSize, int ItemsPerThread>
+template <int kBlockSize, int kItemsPerThread>
 __global__ void layer_norm_kernel(const float* input, const float* weight, const float* bias,
                                   float* output, int N, int C, float eps) {
-    using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
-    using BlockReduce = cub::BlockReduce<float2, BlockSize>;
+    using BlockLoad = cub::BlockLoad<float, kBlockSize, kItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
+    using BlockReduce = cub::BlockReduce<float2, kBlockSize>;
     using BlockStore =
-        cub::BlockStore<float, BlockSize, ItemsPerThread, cub::BLOCK_STORE_VECTORIZE>;
+        cub::BlockStore<float, kBlockSize, kItemsPerThread, cub::BLOCK_STORE_VECTORIZE>;
 
     __shared__ union {
         typename BlockLoad::TempStorage load;
@@ -21,13 +21,13 @@ __global__ void layer_norm_kernel(const float* input, const float* weight, const
         typename BlockStore::TempStorage store;
     } temp_storage;
 
-    float input_items[ItemsPerThread];
+    float input_items[kItemsPerThread];
     BlockLoad(temp_storage.load).Load(input + blockIdx.x * C, input_items, C, 0.0f);
 
     float sum = 0.0f;
     float square_sum = 0.0f;
 #pragma unroll
-    for (int i = 0; i < ItemsPerThread; i++) {
+    for (int i = 0; i < kItemsPerThread; i++) {
         sum += input_items[i];
         square_sum += input_items[i] * input_items[i];
     }
@@ -45,12 +45,12 @@ __global__ void layer_norm_kernel(const float* input, const float* weight, const
     }
     __syncthreads();
 
-    float weight_items[ItemsPerThread];
-    float bias_items[ItemsPerThread];
+    float weight_items[kItemsPerThread];
+    float bias_items[kItemsPerThread];
     BlockLoad(temp_storage.load).Load(weight, weight_items, C, 0.0f);
     BlockLoad(temp_storage.load).Load(bias, bias_items, C, 0.0f);
 #pragma unroll
-    for (int i = 0; i < ItemsPerThread; i++) {
+    for (int i = 0; i < kItemsPerThread; i++) {
         input_items[i] = weight_items[i] * (input_items[i] - mean) * inv_std + bias_items[i];
     }
 
