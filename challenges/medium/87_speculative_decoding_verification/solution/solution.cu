@@ -2,7 +2,7 @@
 #include <cuda_runtime.h>
 #include <thrust/functional.h>
 
-template <int BlockSize, int ItemsPerThread>
+template <int kBlockSize, int kItemsPerThread>
 __global__ void verify_kernel(const int* draft_tokens,      // [B, T]
                               const float* draft_probs,     // [B, T, V]
                               const float* target_probs,    // [B, T, V]
@@ -30,10 +30,10 @@ __global__ void verify_kernel(const int* draft_tokens,      // [B, T]
     }
     __syncthreads();
 
-    using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
-    using BlockReduceFloat = cub::BlockReduce<float, BlockSize>;
-    using BlockScan = cub::BlockScan<float, BlockSize>;
-    using BlockReduceInt = cub::BlockReduce<int, BlockSize>;
+    using BlockLoad = cub::BlockLoad<float, kBlockSize, kItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
+    using BlockReduceFloat = cub::BlockReduce<float, kBlockSize>;
+    using BlockScan = cub::BlockScan<float, kBlockSize>;
+    using BlockReduceInt = cub::BlockReduce<int, kBlockSize>;
 
     __shared__ union {
         typename BlockLoad::TempStorage load;
@@ -43,17 +43,17 @@ __global__ void verify_kernel(const int* draft_tokens,      // [B, T]
     } temp_storage;
 
     if (num_accepted_tokens < T) {
-        float draft_prob_items[ItemsPerThread];
-        float target_prob_items[ItemsPerThread];
+        float draft_prob_items[kItemsPerThread];
+        float target_prob_items[kItemsPerThread];
         BlockLoad(temp_storage.load)
             .Load(draft_probs + batch_idx * T * V + num_accepted_tokens * V, draft_prob_items, V,
                   0.0f);
         BlockLoad(temp_storage.load)
             .Load(target_probs + batch_idx * T * V + num_accepted_tokens * V, target_prob_items, V,
                   0.0f);
-        float adjusted_prob_items[ItemsPerThread];
+        float adjusted_prob_items[kItemsPerThread];
 #pragma unroll
-        for (int i = 0; i < ItemsPerThread; ++i) {
+        for (int i = 0; i < kItemsPerThread; ++i) {
             adjusted_prob_items[i] = fmaxf(0.0f, target_prob_items[i] - draft_prob_items[i]);
         }
         float adjusted_sum = BlockReduceFloat(temp_storage.reduce_float).Sum(adjusted_prob_items);
@@ -63,7 +63,7 @@ __global__ void verify_kernel(const int* draft_tokens,      // [B, T]
         }
         __syncthreads();
 #pragma unroll
-        for (int i = 0; i < ItemsPerThread; ++i) {
+        for (int i = 0; i < kItemsPerThread; ++i) {
             if (adjusted_sum_s > 0.0f) {
                 adjusted_prob_items[i] /= adjusted_sum_s;
             } else {
@@ -72,12 +72,12 @@ __global__ void verify_kernel(const int* draft_tokens,      // [B, T]
         }
         BlockScan(temp_storage.scan).InclusiveSum(adjusted_prob_items, adjusted_prob_items);
         __syncthreads();
-        int candidate_tokens[ItemsPerThread];
+        int candidate_tokens[kItemsPerThread];
         float uniform_sample = uniform_samples[batch_idx * (T + 1) + T];
 #pragma unroll
-        for (int i = 0; i < ItemsPerThread; ++i) {
+        for (int i = 0; i < kItemsPerThread; ++i) {
             if (adjusted_prob_items[i] >= uniform_sample) {
-                candidate_tokens[i] = threadIdx.x * ItemsPerThread + i;
+                candidate_tokens[i] = threadIdx.x * kItemsPerThread + i;
             } else {
                 candidate_tokens[i] = V;
             }
@@ -88,18 +88,18 @@ __global__ void verify_kernel(const int* draft_tokens,      // [B, T]
             output_tokens[batch_idx * (T + 1) + num_accepted_tokens] = min(sampled_token, V - 1);
         }
     } else {
-        float target_prob_items[ItemsPerThread];
+        float target_prob_items[kItemsPerThread];
         BlockLoad(temp_storage.load)
             .Load(target_probs + batch_idx * T * V + (num_accepted_tokens - 1) * V,
                   target_prob_items, V, 0.0f);
         BlockScan(temp_storage.scan).InclusiveSum(target_prob_items, target_prob_items);
         __syncthreads();
-        int candidate_tokens[ItemsPerThread];
+        int candidate_tokens[kItemsPerThread];
         float uniform_sample = uniform_samples[batch_idx * (T + 1) + num_accepted_tokens];
 #pragma unroll
-        for (int i = 0; i < ItemsPerThread; i++) {
+        for (int i = 0; i < kItemsPerThread; i++) {
             if (target_prob_items[i] >= uniform_sample) {
-                candidate_tokens[i] = threadIdx.x * ItemsPerThread + i;
+                candidate_tokens[i] = threadIdx.x * kItemsPerThread + i;
             } else {
                 candidate_tokens[i] = V;
             }

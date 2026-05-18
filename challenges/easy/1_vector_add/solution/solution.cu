@@ -1,24 +1,24 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
-template <int BlockSize, int ItemsPerThread>
+template <int kBlockSize, int kItemsPerThread>
 __global__ void add_vector_kernel(const float* A, const float* B, float* C, int N) {
-    using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
+    using BlockLoad = cub::BlockLoad<float, kBlockSize, kItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
     using BlockStore =
-        cub::BlockStore<float, BlockSize, ItemsPerThread, cub::BLOCK_STORE_VECTORIZE>;
+        cub::BlockStore<float, kBlockSize, kItemsPerThread, cub::BLOCK_STORE_VECTORIZE>;
 
     __shared__ union {
         typename BlockLoad::TempStorage load;
         typename BlockStore::TempStorage store;
     } temp_storage;
 
-    int block_offset = blockIdx.x * BlockSize * ItemsPerThread;
-    float a_items[ItemsPerThread];
-    float b_items[ItemsPerThread];
+    int block_offset = blockIdx.x * kBlockSize * kItemsPerThread;
+    float a_items[kItemsPerThread];
+    float b_items[kItemsPerThread];
     BlockLoad(temp_storage.load).Load(A + block_offset, a_items, N - block_offset);
     BlockLoad(temp_storage.load).Load(B + block_offset, b_items, N - block_offset);
 #pragma unroll
-    for (int i = 0; i < ItemsPerThread; ++i) {
+    for (int i = 0; i < kItemsPerThread; ++i) {
         a_items[i] += b_items[i];
     }
     BlockStore(temp_storage.store).Store(C + block_offset, a_items, N - block_offset);

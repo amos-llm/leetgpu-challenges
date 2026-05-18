@@ -1,13 +1,13 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
-template <int BlockSize, int ItemsPerThread>
+template <int kBlockSize, int kItemsPerThread>
 __global__ void rms_norm_kernel(const float* x, float* residual, const float* weight, float* out,
                                 int N, int C, float eps) {
-    using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
-    using BlockReduce = cub::BlockReduce<float, BlockSize>;
+    using BlockLoad = cub::BlockLoad<float, kBlockSize, kItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
+    using BlockReduce = cub::BlockReduce<float, kBlockSize>;
     using BlockStore =
-        cub::BlockStore<float, BlockSize, ItemsPerThread, cub::BLOCK_STORE_VECTORIZE>;
+        cub::BlockStore<float, kBlockSize, kItemsPerThread, cub::BLOCK_STORE_VECTORIZE>;
 
     __shared__ union {
         typename BlockLoad::TempStorage load;
@@ -15,15 +15,15 @@ __global__ void rms_norm_kernel(const float* x, float* residual, const float* we
         typename BlockStore::TempStorage store;
     } temp_storage;
 
-    float x_items[ItemsPerThread];
-    float r_items[ItemsPerThread];
+    float x_items[kItemsPerThread];
+    float r_items[kItemsPerThread];
     BlockLoad(temp_storage.load).Load(x + blockIdx.x * C, x_items, C, 0.0f);
     BlockLoad(temp_storage.load).Load(residual + blockIdx.x * C, r_items, C, 0.0f);
 
-    float z_items[ItemsPerThread];
+    float z_items[kItemsPerThread];
     float z_square_sum = 0.0f;
 #pragma unroll
-    for (int i = 0; i < ItemsPerThread; i++) {
+    for (int i = 0; i < kItemsPerThread; i++) {
         float z = x_items[i] + r_items[i];
         z_items[i] = z;
         z_square_sum += z * z;
@@ -36,9 +36,9 @@ __global__ void rms_norm_kernel(const float* x, float* residual, const float* we
     __syncthreads();
 
 #pragma unroll
-    for (int i = 0; i < ItemsPerThread; i++) {
-        if (threadIdx.x * ItemsPerThread + i < C) {
-            z_items[i] *= rrms * weight[threadIdx.x * ItemsPerThread + i];
+    for (int i = 0; i < kItemsPerThread; i++) {
+        if (threadIdx.x * kItemsPerThread + i < C) {
+            z_items[i] *= rrms * weight[threadIdx.x * kItemsPerThread + i];
         }
     }
     BlockStore(temp_storage.store).Store(out + blockIdx.x * C, z_items, C);

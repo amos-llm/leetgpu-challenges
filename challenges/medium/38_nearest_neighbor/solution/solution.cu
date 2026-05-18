@@ -1,7 +1,7 @@
 #include <cuda_runtime.h>
 #include <float.h>
 
-template <int BlockSizeK>
+template <int kBlockSizeK>
 __global__ void nearest_neighbor_kernel(const float* points, int* indices, int N) {
     int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
     float x = points[global_idx * 3];
@@ -10,10 +10,10 @@ __global__ void nearest_neighbor_kernel(const float* points, int* indices, int N
     float min_dist = FLT_MAX;
     int min_idx = -1;
 
-    __shared__ float shared_points[BlockSizeK][3];
-    for (int i = 0; i < (N + BlockSizeK - 1) / BlockSizeK; ++i) {
-        for (int j = threadIdx.x; j < BlockSizeK; j += blockDim.x) {
-            int idx = i * BlockSizeK + j;
+    __shared__ float shared_points[kBlockSizeK][3];
+    for (int i = 0; i < (N + kBlockSizeK - 1) / kBlockSizeK; ++i) {
+        for (int j = threadIdx.x; j < kBlockSizeK; j += blockDim.x) {
+            int idx = i * kBlockSizeK + j;
             if (idx < N) {
                 shared_points[j][0] = points[idx * 3];
                 shared_points[j][1] = points[idx * 3 + 1];
@@ -27,8 +27,8 @@ __global__ void nearest_neighbor_kernel(const float* points, int* indices, int N
         __syncthreads();
 
 #pragma unroll
-        for (int j = 0; j < BlockSizeK; ++j) {
-            int idx = i * BlockSizeK + j;
+        for (int j = 0; j < kBlockSizeK; ++j) {
+            int idx = i * kBlockSizeK + j;
             if (idx < N && idx != global_idx) {
                 float dx = x - shared_points[j][0];
                 float dy = y - shared_points[j][1];

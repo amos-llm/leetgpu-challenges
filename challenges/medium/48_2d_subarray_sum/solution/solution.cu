@@ -1,19 +1,19 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
-template <int BlockSize, int ItemsPerThread>
+template <int kBlockSize, int kItemsPerThread>
 __global__ void sum(const int* input, int* output, int N, int M, int S_ROW, int E_ROW, int S_COL,
                     int E_COL) {
-    using BlockLoad = cub::BlockLoad<int, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
-    using BlockReduce = cub::BlockReduce<int, BlockSize>;
+    using BlockLoad = cub::BlockLoad<int, kBlockSize, kItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
+    using BlockReduce = cub::BlockReduce<int, kBlockSize>;
 
     __shared__ union {
         typename BlockLoad::TempStorage load;
         typename BlockReduce::TempStorage reduce;
     } temp_storage;
 
-    int items[ItemsPerThread];
-    int block_offset = S_COL + blockIdx.y * BlockSize * ItemsPerThread;
+    int items[kItemsPerThread];
+    int block_offset = S_COL + blockIdx.y * kBlockSize * kItemsPerThread;
     BlockLoad(temp_storage.load)
         .Load(input + (S_ROW + blockIdx.x) * M + block_offset, items, E_COL - block_offset + 1, 0);
 

@@ -1,23 +1,23 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
-template <int BlockSize, int ItemsPerThread>
+template <int kBlockSize, int kItemsPerThread>
 __global__ void mse_kernel(const float* predictions, const float* targets, float* mse, int N) {
-    using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
-    using BlockReduce = cub::BlockReduce<float, BlockSize>;
+    using BlockLoad = cub::BlockLoad<float, kBlockSize, kItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
+    using BlockReduce = cub::BlockReduce<float, kBlockSize>;
 
     __shared__ union {
         typename BlockLoad::TempStorage load;
         typename BlockReduce::TempStorage reduce;
     } temp_storage;
 
-    float p_items[ItemsPerThread];
-    float t_items[ItemsPerThread];
-    int block_offset = blockIdx.x * BlockSize * ItemsPerThread;
+    float p_items[kItemsPerThread];
+    float t_items[kItemsPerThread];
+    int block_offset = blockIdx.x * kBlockSize * kItemsPerThread;
     BlockLoad(temp_storage.load).Load(predictions + block_offset, p_items, N - block_offset, 0.0f);
     BlockLoad(temp_storage.load).Load(targets + block_offset, t_items, N - block_offset, 0.0f);
 #pragma unroll
-    for (int i = 0; i < ItemsPerThread; i++) {
+    for (int i = 0; i < kItemsPerThread; i++) {
         p_items[i] = (p_items[i] - t_items[i]) * (p_items[i] - t_items[i]);
     }
 

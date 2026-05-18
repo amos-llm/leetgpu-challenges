@@ -1,7 +1,7 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
-template <int BlockSize, int ItemsPerThread>
+template <int kBlockSize, int kItemsPerThread>
 __global__ void cross_entropy_kernel(const float* logits, const int* true_labels, float* loss,
                                      int N, int C) {
     struct RowStats {
@@ -14,8 +14,8 @@ __global__ void cross_entropy_kernel(const float* logits, const int* true_labels
             return RowStats{max, a.sum * expf(a.max - max) + b.sum * expf(b.max - max)};
         }
     };
-    using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
-    using BlockReduce = cub::BlockReduce<RowStats, BlockSize>;
+    using BlockLoad = cub::BlockLoad<float, kBlockSize, kItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
+    using BlockReduce = cub::BlockReduce<RowStats, kBlockSize>;
 
     __shared__ union {
         typename BlockLoad::TempStorage load;
@@ -23,13 +23,13 @@ __global__ void cross_entropy_kernel(const float* logits, const int* true_labels
     } temp_storage;
 
     RowStats stats{-1e38f, 0.0f};
-    float logit_items[ItemsPerThread];
-    for (int i = 0; i < C; i += BlockSize * ItemsPerThread) {
+    float logit_items[kItemsPerThread];
+    for (int i = 0; i < C; i += kBlockSize * kItemsPerThread) {
         int block_offset = blockIdx.x * C + i;
         BlockLoad(temp_storage.load).Load(logits + block_offset, logit_items, C - i, -1e38f);
 
 #pragma unroll
-        for (int j = 0; j < ItemsPerThread; j++) {
+        for (int j = 0; j < kItemsPerThread; j++) {
             float max = fmaxf(stats.max, logit_items[j]);
             stats.sum = stats.sum * expf(stats.max - max) + expf(logit_items[j] - max);
             stats.max = max;

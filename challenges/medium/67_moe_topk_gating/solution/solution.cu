@@ -2,13 +2,13 @@
 #include <cuda_runtime.h>
 #include <float.h>
 
-template <int K>
+template <int kK>
 __device__ void insert_topk(float* weights, int* indices, float weight, int index) {
 #pragma unroll
-    for (int i = 0; i < K; ++i) {
+    for (int i = 0; i < kK; ++i) {
         if (weight > weights[i]) {
 #pragma unroll
-            for (int j = K - 1; j > i; --j) {
+            for (int j = kK - 1; j > i; --j) {
                 weights[j] = weights[j - 1];
                 indices[j] = indices[j - 1];
             }
@@ -19,19 +19,19 @@ __device__ void insert_topk(float* weights, int* indices, float weight, int inde
     }
 }
 
-template <int K>
+template <int kK>
 __device__ void merge_topk(float* dst_weights, int* dst_indices, const float* src_weights,
                            const int* src_indices) {
 #pragma unroll
-    for (int i = 0; i < K; ++i) {
-        insert_topk<K>(dst_weights, dst_indices, src_weights[i], src_indices[i]);
+    for (int i = 0; i < kK; ++i) {
+        insert_topk<kK>(dst_weights, dst_indices, src_weights[i], src_indices[i]);
     }
 }
 
-template <int K>
+template <int kK>
 __global__ void moe_topk_kernel(const float* __restrict__ logits, // [M, E]
-                                float* __restrict__ topk_weights, // [M, K]
-                                int* __restrict__ topk_indices,   // [M, K]
+                                float* __restrict__ topk_weights, // [M, kK]
+                                int* __restrict__ topk_indices,   // [M, kK]
                                 int M, int E) {
     int lane_id = threadIdx.x % 32;
     int warp_id = threadIdx.x / 32;
@@ -41,31 +41,31 @@ __global__ void moe_topk_kernel(const float* __restrict__ logits, // [M, E]
         return;
     }
 
-    float top_weights[K];
-    int top_indices[K];
+    float top_weights[kK];
+    int top_indices[kK];
 #pragma unroll
-    for (int i = 0; i < K; ++i) {
+    for (int i = 0; i < kK; ++i) {
         top_weights[i] = -FLT_MAX;
         top_indices[i] = -1;
     }
 
     for (int e = lane_id; e < E; e += 32) {
         float logit = logits[row_idx * E + e];
-        insert_topk<K>(top_weights, top_indices, logit, e);
+        insert_topk<kK>(top_weights, top_indices, logit, e);
     }
 
 #pragma unroll
     for (int s = 16; s > 0; s /= 2) {
-        float other_weights[K];
-        int other_indices[K];
+        float other_weights[kK];
+        int other_indices[kK];
 #pragma unroll
-        for (int i = 0; i < K; ++i) {
+        for (int i = 0; i < kK; ++i) {
             other_weights[i] = __shfl_down_sync(0xffffffff, top_weights[i], s);
 
             other_indices[i] = __shfl_down_sync(0xffffffff, top_indices[i], s);
         }
         if (lane_id < s) {
-            merge_topk<K>(top_weights, top_indices, other_weights, other_indices);
+            merge_topk<kK>(top_weights, top_indices, other_weights, other_indices);
         }
     }
 
@@ -73,14 +73,14 @@ __global__ void moe_topk_kernel(const float* __restrict__ logits, // [M, E]
         float max_weight = top_weights[0];
         float weight_exp_sum = 0.0f;
 #pragma unroll
-        for (int i = 0; i < K; ++i) {
+        for (int i = 0; i < kK; ++i) {
             top_weights[i] = expf(top_weights[i] - max_weight);
             weight_exp_sum += top_weights[i];
         }
 #pragma unroll
-        for (int i = 0; i < K; ++i) {
-            topk_weights[row_idx * K + i] = top_weights[i] / weight_exp_sum;
-            topk_indices[row_idx * K + i] = top_indices[i];
+        for (int i = 0; i < kK; ++i) {
+            topk_weights[row_idx * kK + i] = top_weights[i] / weight_exp_sum;
+            topk_indices[row_idx * kK + i] = top_indices[i];
         }
     }
 }

@@ -1,9 +1,9 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
-template <int BlockSize, int ItemsPerThread>
+template <int kBlockSize, int kItemsPerThread>
 __global__ void histogram_kernel(const int* input, int* histogram, int N, int num_bins) {
-    using BlockLoad = cub::BlockLoad<int, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
+    using BlockLoad = cub::BlockLoad<int, kBlockSize, kItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
     __shared__ typename BlockLoad::TempStorage temp_storage;
     extern __shared__ int s_histogram[];
 
@@ -12,11 +12,11 @@ __global__ void histogram_kernel(const int* input, int* histogram, int N, int nu
     }
     __syncthreads();
 
-    int block_offset = blockIdx.x * BlockSize * ItemsPerThread;
-    int items[ItemsPerThread];
+    int block_offset = blockIdx.x * kBlockSize * kItemsPerThread;
+    int items[kItemsPerThread];
     BlockLoad(temp_storage).Load(input + block_offset, items, N - block_offset, -1);
 #pragma unroll
-    for (int i = 0; i < ItemsPerThread; ++i) {
+    for (int i = 0; i < kItemsPerThread; ++i) {
         int value = items[i];
         if (value >= 0 && value < num_bins) {
             atomicAdd(&s_histogram[value], 1);

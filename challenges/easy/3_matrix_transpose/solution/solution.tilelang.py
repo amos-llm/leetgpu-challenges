@@ -1,14 +1,14 @@
-import torch
 import tilelang
 import tilelang.language as T
+import torch
 
 
 @tilelang.jit
 def matrix_transpose(rows, cols):
     @T.prim_func
     def main(
-        input: T.Tensor[(rows, cols), "float32"],
-        output: T.Tensor[(cols, rows), "float32"],
+        input: T.Tensor[(rows, cols), T.float32],
+        output: T.Tensor[(cols, rows), T.float32],
     ):
         BLOCK_SIZE = 16
         with T.Kernel(
