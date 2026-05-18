@@ -1,19 +1,19 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
-template <int BlockSize, int ItemsPerThread>
+template <int kBlockSize, int kItemsPerThread>
 __global__ void monte_carlo_kernel(const float* y_samples, float* result, float a, float b,
                                    int n_samples) {
-    using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
-    using BlockReduce = cub::BlockReduce<float, BlockSize>;
+    using BlockLoad = cub::BlockLoad<float, kBlockSize, kItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
+    using BlockReduce = cub::BlockReduce<float, kBlockSize>;
 
     __shared__ union {
         typename BlockLoad::TempStorage load;
         typename BlockReduce::TempStorage reduce;
     } temp_storage;
 
-    float items[ItemsPerThread];
-    int block_offset = blockIdx.x * BlockSize * ItemsPerThread;
+    float items[kItemsPerThread];
+    int block_offset = blockIdx.x * kBlockSize * kItemsPerThread;
     BlockLoad(temp_storage.load)
         .Load(y_samples + block_offset, items, n_samples - block_offset, 0.0f);
 

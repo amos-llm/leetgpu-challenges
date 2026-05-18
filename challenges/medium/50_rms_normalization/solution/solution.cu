@@ -1,22 +1,22 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
-template <int BlockSize, int ItemsPerThread>
+template <int kBlockSize, int kItemsPerThread>
 __global__ void mean_square_kernel(const float* input, float* ms, int N) {
-    using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
-    using BlockReduce = cub::BlockReduce<float, BlockSize>;
+    using BlockLoad = cub::BlockLoad<float, kBlockSize, kItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
+    using BlockReduce = cub::BlockReduce<float, kBlockSize>;
 
     __shared__ union {
         typename BlockLoad::TempStorage load;
         typename BlockReduce::TempStorage reduce;
     } temp_storage;
 
-    float items[ItemsPerThread];
-    int block_offset = blockIdx.x * BlockSize * ItemsPerThread;
+    float items[kItemsPerThread];
+    int block_offset = blockIdx.x * kBlockSize * kItemsPerThread;
     BlockLoad(temp_storage.load).Load(input + block_offset, items, N - block_offset, 0.0f);
 
 #pragma unroll
-    for (int i = 0; i < ItemsPerThread; ++i) {
+    for (int i = 0; i < kItemsPerThread; ++i) {
         items[i] = items[i] * items[i];
     }
     float sum_square = BlockReduce(temp_storage.reduce).Sum(items);
@@ -25,24 +25,24 @@ __global__ void mean_square_kernel(const float* input, float* ms, int N) {
     }
 }
 
-template <int BlockSize, int ItemsPerThread>
+template <int kBlockSize, int kItemsPerThread>
 __global__ void norm_kernel(const float* input, float gamma, float beta, float* ms, float* output,
                             int N, float eps) {
-    using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
+    using BlockLoad = cub::BlockLoad<float, kBlockSize, kItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
     using BlockStore =
-        cub::BlockStore<float, BlockSize, ItemsPerThread, cub::BLOCK_STORE_VECTORIZE>;
+        cub::BlockStore<float, kBlockSize, kItemsPerThread, cub::BLOCK_STORE_VECTORIZE>;
     __shared__ union {
         typename BlockLoad::TempStorage load;
         typename BlockStore::TempStorage store;
     } temp_storage;
 
-    float items[ItemsPerThread];
-    int block_offset = blockIdx.x * BlockSize * ItemsPerThread;
+    float items[kItemsPerThread];
+    int block_offset = blockIdx.x * kBlockSize * kItemsPerThread;
     BlockLoad(temp_storage.load).Load(input + block_offset, items, N - block_offset, 0.0f);
 
     float rrms = rsqrtf(*ms + eps);
 #pragma unroll
-    for (int i = 0; i < ItemsPerThread; ++i) {
+    for (int i = 0; i < kItemsPerThread; ++i) {
         items[i] = items[i] * rrms * gamma + beta;
     }
 

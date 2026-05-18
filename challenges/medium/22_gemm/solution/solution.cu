@@ -1,16 +1,16 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
-template <int BM, int BN, int BK>
+template <int kBM, int kBN, int kBK>
 __global__ void gemm_kernel(const __half* A, const __half* B, __half* C, int M, int N, int K,
                             float alpha, float beta) {
-    __shared__ __half s_A[BM][BK];
-    __shared__ __half s_B[BK][BN];
+    __shared__ __half s_A[kBM][kBK];
+    __shared__ __half s_B[kBK][kBN];
 
     float acc = 0.0f;
-    for (int k0 = 0; k0 < K; k0 += BK) {
-        for (int j = threadIdx.x; j < BK; j += blockDim.x) {
-            int row = blockIdx.y * BM + threadIdx.y;
+    for (int k0 = 0; k0 < K; k0 += kBK) {
+        for (int j = threadIdx.x; j < kBK; j += blockDim.x) {
+            int row = blockIdx.y * kBM + threadIdx.y;
             int col = k0 + j;
             if (row < M && col < K) {
                 s_A[threadIdx.y][j] = A[row * K + col];
@@ -18,9 +18,9 @@ __global__ void gemm_kernel(const __half* A, const __half* B, __half* C, int M, 
                 s_A[threadIdx.y][j] = __float2half(0.0f);
             }
         }
-        for (int i = threadIdx.y; i < BK; i += blockDim.y) {
+        for (int i = threadIdx.y; i < kBK; i += blockDim.y) {
             int row = k0 + i;
-            int col = blockIdx.x * BN + threadIdx.x;
+            int col = blockIdx.x * kBN + threadIdx.x;
             if (row < K && col < N) {
                 s_B[i][threadIdx.x] = B[row * N + col];
             } else {
@@ -29,14 +29,14 @@ __global__ void gemm_kernel(const __half* A, const __half* B, __half* C, int M, 
         }
         __syncthreads();
 
-        for (int k = 0; k < BK; ++k) {
+        for (int k = 0; k < kBK; ++k) {
             acc += __half2float(s_A[threadIdx.y][k]) * __half2float(s_B[k][threadIdx.x]);
         }
         __syncthreads();
     }
 
-    int global_row = blockIdx.y * BM + threadIdx.y;
-    int global_col = blockIdx.x * BN + threadIdx.x;
+    int global_row = blockIdx.y * kBM + threadIdx.y;
+    int global_col = blockIdx.x * kBN + threadIdx.x;
     if (global_row < M && global_col < N) {
         float c = __half2float(C[global_row * N + global_col]);
         C[global_row * N + global_col] = alpha * acc + beta * c;

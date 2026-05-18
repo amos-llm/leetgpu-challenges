@@ -7,10 +7,10 @@ struct ReduceOp {
     }
 };
 
-template <int BlockSize>
+template <int kBlockSize>
 __global__ void batch_norm_kernel(const float* input, const float* gamma, const float* beta,
                                   float* output, int N, int C, float eps) {
-    using BlockReduce = cub::BlockReduce<float2, BlockSize>;
+    using BlockReduce = cub::BlockReduce<float2, kBlockSize>;
 
     __shared__ typename BlockReduce::TempStorage temp_storage;
 

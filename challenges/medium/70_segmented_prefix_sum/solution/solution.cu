@@ -2,7 +2,7 @@
 #include <cuda_runtime.h>
 #include <thrust/functional.h>
 
-template <int BlockSize>
+template <int kBlockSize>
 __global__ void local_scan_kernel(const float* values, const int* flags, float* prefix_sums,
                                   int* first_flag_indices, float* last_segment_sums, int N) {
     struct FlagValue {
@@ -19,8 +19,8 @@ __global__ void local_scan_kernel(const float* values, const int* flags, float* 
         }
     };
 
-    using BlockReduce = cub::BlockReduce<int, BlockSize>;
-    using BlockScan = cub::BlockScan<FlagValue, BlockSize>;
+    using BlockReduce = cub::BlockReduce<int, kBlockSize>;
+    using BlockScan = cub::BlockScan<FlagValue, kBlockSize>;
 
     __shared__ union {
         typename BlockReduce::TempStorage reduce;
@@ -35,7 +35,7 @@ __global__ void local_scan_kernel(const float* values, const int* flags, float* 
         value = values[idx];
     }
 
-    int first_flag_index = BlockSize;
+    int first_flag_index = kBlockSize;
     if (idx < N && flag == 1) {
         first_flag_index = threadIdx.x;
     }
@@ -58,7 +58,7 @@ __global__ void local_scan_kernel(const float* values, const int* flags, float* 
     }
 }
 
-template <int BlockSize>
+template <int kBlockSize>
 __global__ void global_scan_kernel(const int* first_flag_indices, const float* last_segment_sums,
                                    float* offsets, int N) {
     struct IndexSum {
@@ -68,19 +68,19 @@ __global__ void global_scan_kernel(const int* first_flag_indices, const float* l
 
     struct ScanOp {
         __device__ IndexSum operator()(IndexSum a, IndexSum b) const {
-            if (b.index < BlockSize) {
+            if (b.index < kBlockSize) {
                 return IndexSum{b.index, b.sum};
             }
             return IndexSum{a.index, a.sum + b.sum};
         }
     };
 
-    using BlockScan = cub::BlockScan<IndexSum, BlockSize>;
+    using BlockScan = cub::BlockScan<IndexSum, kBlockSize>;
 
     __shared__ typename BlockScan::TempStorage temp_storage;
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int index = BlockSize;
+    int index = kBlockSize;
     float sum = 0.0f;
     if (idx < N) {
         index = first_flag_indices[idx];
@@ -89,7 +89,7 @@ __global__ void global_scan_kernel(const int* first_flag_indices, const float* l
 
     IndexSum index_sum{index, sum};
     BlockScan(temp_storage)
-        .ExclusiveScan(index_sum, index_sum, IndexSum{BlockSize, 0.0f}, ScanOp());
+        .ExclusiveScan(index_sum, index_sum, IndexSum{kBlockSize, 0.0f}, ScanOp());
     if (idx < N) {
         offsets[idx] = index_sum.sum;
     }
@@ -103,7 +103,7 @@ void global_scan(const int* first_segment_indices, const float* last_segment_sum
         <<<grid_size, kBlockSize>>>(first_segment_indices, last_segment_sums, offsets, N);
 }
 
-template <int BlockSize>
+template <int kBlockSize>
 __global__ void add_offset_kernel(const int* flags, const float* prefix_sums,
                                   const int* first_flag_indices, const float* offsets,
                                   float* output, int N) {

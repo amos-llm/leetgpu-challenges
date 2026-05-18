@@ -1,23 +1,23 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
-template <int BlockSize, int ItemsPerThread>
+template <int kBlockSize, int kItemsPerThread>
 __global__ void count_positive_kernel(const float* input, int* output, int N) {
-    using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
-    using BlockReduce = cub::BlockReduce<int, BlockSize>;
+    using BlockLoad = cub::BlockLoad<float, kBlockSize, kItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
+    using BlockReduce = cub::BlockReduce<int, kBlockSize>;
 
     __shared__ union {
         typename BlockLoad::TempStorage load;
         typename BlockReduce::TempStorage reduce;
     } temp_storage;
 
-    float items[ItemsPerThread];
-    int block_offset = blockIdx.x * BlockSize * ItemsPerThread;
+    float items[kItemsPerThread];
+    int block_offset = blockIdx.x * kBlockSize * kItemsPerThread;
     BlockLoad(temp_storage.load).Load(input + block_offset, items, N - block_offset, 0.0f);
 
     int count = 0;
 #pragma unroll
-    for (int i = 0; i < ItemsPerThread; ++i) {
+    for (int i = 0; i < kItemsPerThread; ++i) {
         if (items[i] > 0.0f) {
             count++;
         }
@@ -29,30 +29,30 @@ __global__ void count_positive_kernel(const float* input, int* output, int N) {
     }
 }
 
-template <int BlockSize, int ItemsPerThread>
+template <int kBlockSize, int kItemsPerThread>
 __global__ void compact_kernel(const float* input, float* output, int* offset, int N) {
-    using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
-    using BlockScan = cub::BlockScan<int, BlockSize>;
+    using BlockLoad = cub::BlockLoad<float, kBlockSize, kItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
+    using BlockScan = cub::BlockScan<int, kBlockSize>;
 
     __shared__ union {
         typename BlockLoad::TempStorage load;
         typename BlockScan::TempStorage scan;
     } temp_storage;
 
-    float items[ItemsPerThread];
-    int block_offset = blockIdx.x * BlockSize * ItemsPerThread;
+    float items[kItemsPerThread];
+    int block_offset = blockIdx.x * kBlockSize * kItemsPerThread;
     BlockLoad(temp_storage.load).Load(input + block_offset, items, N - block_offset, 0.0f);
 
-    int flags[ItemsPerThread];
+    int flags[kItemsPerThread];
 #pragma unroll
-    for (int i = 0; i < ItemsPerThread; ++i) {
+    for (int i = 0; i < kItemsPerThread; ++i) {
         if (items[i] > 0.0f) {
             flags[i] = 1;
         } else {
             flags[i] = 0;
         }
     }
-    int local_offsets[ItemsPerThread];
+    int local_offsets[kItemsPerThread];
     BlockScan(temp_storage.scan).ExclusiveSum(flags, local_offsets);
 
     int output_start = 0;
@@ -60,7 +60,7 @@ __global__ void compact_kernel(const float* input, float* output, int* offset, i
         output_start = offset[blockIdx.x - 1];
     }
 #pragma unroll
-    for (int i = 0; i < ItemsPerThread; ++i) {
+    for (int i = 0; i < kItemsPerThread; ++i) {
         if (flags[i] == 1) {
             output[output_start + local_offsets[i]] = items[i];
         }
