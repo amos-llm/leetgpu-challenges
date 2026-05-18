@@ -1,22 +1,22 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
-template <int BlockSize, int ItemsPerThread>
+template <int kBlockSize, int kItemsPerThread>
 __global__ void dot_product(const float* A, const float* B, float* result, int N) {
-    using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
-    using BlockReduce = cub::BlockReduce<float, BlockSize>;
+    using BlockLoad = cub::BlockLoad<float, kBlockSize, kItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
+    using BlockReduce = cub::BlockReduce<float, kBlockSize>;
     __shared__ union {
         typename BlockLoad::TempStorage load;
         typename BlockReduce::TempStorage reduce;
     } temp_storage;
 
-    float a_items[ItemsPerThread];
-    float b_items[ItemsPerThread];
-    int block_offset = blockIdx.x * BlockSize * ItemsPerThread;
+    float a_items[kItemsPerThread];
+    float b_items[kItemsPerThread];
+    int block_offset = blockIdx.x * kBlockSize * kItemsPerThread;
     BlockLoad(temp_storage.load).Load(A + block_offset, a_items, N - block_offset, 0.0f);
     BlockLoad(temp_storage.load).Load(B + block_offset, b_items, N - block_offset, 0.0f);
 #pragma unroll
-    for (int i = 0; i < ItemsPerThread; ++i) {
+    for (int i = 0; i < kItemsPerThread; ++i) {
         a_items[i] *= b_items[i];
     }
 
