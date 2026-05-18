@@ -1,12 +1,12 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
-template <int BlockSize, int ItemsPerThread>
+template <int kBlockSize, int kItemsPerThread>
 __global__ void local_scan_kernel(const float* input, float* output, float* block_sum, int N) {
-    using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
+    using BlockLoad = cub::BlockLoad<float, kBlockSize, kItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
     using BlockStore =
-        cub::BlockStore<float, BlockSize, ItemsPerThread, cub::BLOCK_STORE_VECTORIZE>;
-    using BlockScan = cub::BlockScan<float, BlockSize>;
+        cub::BlockStore<float, kBlockSize, kItemsPerThread, cub::BLOCK_STORE_VECTORIZE>;
+    using BlockScan = cub::BlockScan<float, kBlockSize>;
 
     __shared__ union {
         typename BlockLoad::TempStorage load;
@@ -14,8 +14,8 @@ __global__ void local_scan_kernel(const float* input, float* output, float* bloc
         typename BlockScan::TempStorage scan;
     } temp_storage;
 
-    float items[ItemsPerThread];
-    int block_offset = blockIdx.x * BlockSize * ItemsPerThread;
+    float items[kItemsPerThread];
+    int block_offset = blockIdx.x * kBlockSize * kItemsPerThread;
     BlockLoad(temp_storage.load).Load(input + block_offset, items, N - block_offset, 0.0f);
     float sum = 0.0f;
     BlockScan(temp_storage.scan).InclusiveScan(items, items, thrust::plus<float>(), sum);
@@ -25,24 +25,24 @@ __global__ void local_scan_kernel(const float* input, float* output, float* bloc
     }
 }
 
-template <int BlockSize, int ItemsPerThread>
+template <int kBlockSize, int kItemsPerThread>
 __global__ void add_offset_kernel(const float* input, const float* offset, float* output, int N) {
-    using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
+    using BlockLoad = cub::BlockLoad<float, kBlockSize, kItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
     using BlockStore =
-        cub::BlockStore<float, BlockSize, ItemsPerThread, cub::BLOCK_STORE_VECTORIZE>;
+        cub::BlockStore<float, kBlockSize, kItemsPerThread, cub::BLOCK_STORE_VECTORIZE>;
 
     __shared__ union {
         typename BlockLoad::TempStorage load;
         typename BlockStore::TempStorage store;
     } temp_storage;
 
-    float items[ItemsPerThread];
-    int block_offset = blockIdx.x * BlockSize * ItemsPerThread;
+    float items[kItemsPerThread];
+    int block_offset = blockIdx.x * kBlockSize * kItemsPerThread;
     BlockLoad(temp_storage.load).Load(input + block_offset, items, N - block_offset, 0.0f);
     int bid = blockIdx.x;
     if (bid > 0) {
 #pragma unroll
-        for (int i = 0; i < ItemsPerThread; ++i) {
+        for (int i = 0; i < kItemsPerThread; ++i) {
             items[i] += offset[bid - 1];
         }
     }

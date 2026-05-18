@@ -2,24 +2,24 @@
 #include <cuda_runtime.h>
 #include <float.h>
 
-template <int BlockSize, int ItemsPerThread>
+template <int kBlockSize, int kItemsPerThread>
 __global__ void topk_kernel(const float* input, float* output, int N, int k) {
-    using BlockLoad = cub::BlockLoad<float, BlockSize, ItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
-    using BlockSort = cub::BlockRadixSort<float, BlockSize, ItemsPerThread>;
+    using BlockLoad = cub::BlockLoad<float, kBlockSize, kItemsPerThread, cub::BLOCK_LOAD_VECTORIZE>;
+    using BlockSort = cub::BlockRadixSort<float, kBlockSize, kItemsPerThread>;
 
     __shared__ union {
         typename BlockLoad::TempStorage load;
         typename BlockSort::TempStorage sort;
     } temp_storage;
 
-    int block_offset = blockIdx.x * BlockSize * ItemsPerThread;
-    float items[ItemsPerThread];
+    int block_offset = blockIdx.x * kBlockSize * kItemsPerThread;
+    float items[kItemsPerThread];
     BlockLoad(temp_storage.load).Load(input + block_offset, items, N - block_offset, -FLT_MAX);
     BlockSort(temp_storage.sort).SortDescending(items);
 
 #pragma unroll
-    for (int i = 0; i < ItemsPerThread; ++i) {
-        int idx = threadIdx.x * ItemsPerThread + i;
+    for (int i = 0; i < kItemsPerThread; ++i) {
+        int idx = threadIdx.x * kItemsPerThread + i;
         if (idx < k) {
             output[blockIdx.x * k + idx] = items[i];
         }
