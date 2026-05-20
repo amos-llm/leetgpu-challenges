@@ -6,10 +6,11 @@ from core.challenge_base import ChallengeBase
 
 
 class Challenge(ChallengeBase):
-    def __init__(self):
-        super().__init__(
-            name="Layer Normalization", atol=1e-04, rtol=1e-04, num_gpus=1, access_tier="free"
-        )
+    name = "Layer Normalization"
+    atol = 1e-04
+    rtol = 1e-04
+    num_gpus = 1
+    access_tier = "free"
 
     def reference_impl(
         self,
@@ -25,7 +26,6 @@ class Challenge(ChallengeBase):
         assert weight.shape == bias.shape == (C,)
         assert input.dtype == weight.dtype == bias.dtype == output.dtype
         assert input.device == weight.device == bias.device == output.device
-        assert str(input.device).startswith("cuda")
 
         mean = input.mean(dim=1, keepdim=True)
         var = input.var(dim=1, keepdim=True, unbiased=False)
@@ -47,11 +47,11 @@ class Challenge(ChallengeBase):
         dtype = torch.float32
         N, C = 2, 4
         input = torch.tensor(
-            [[1.0, 2.0, 3.0, 4.0], [-1.0, 0.0, 0.0, 1.0]], device="cuda", dtype=dtype
+            [[1.0, 2.0, 3.0, 4.0], [-1.0, 0.0, 0.0, 1.0]], device=self.device, dtype=dtype
         )
-        weight = torch.ones(C, device="cuda", dtype=dtype)
-        bias = torch.zeros(C, device="cuda", dtype=dtype)
-        output = torch.empty((N, C), device="cuda", dtype=dtype)
+        weight = torch.ones(C, device=self.device, dtype=dtype)
+        bias = torch.zeros(C, device=self.device, dtype=dtype)
+        output = torch.empty((N, C), device=self.device, dtype=dtype)
         eps = 1e-5
         return {
             "input": input,
@@ -71,10 +71,10 @@ class Challenge(ChallengeBase):
         N, C = 1, 1
         tests.append(
             {
-                "input": torch.tensor([[3.0]], device="cuda", dtype=dtype),
-                "weight": torch.tensor([1.0], device="cuda", dtype=dtype),
-                "bias": torch.tensor([0.5], device="cuda", dtype=dtype),
-                "output": torch.empty((N, C), device="cuda", dtype=dtype),
+                "input": torch.tensor([[3.0]], device=self.device, dtype=dtype),
+                "weight": torch.tensor([1.0], device=self.device, dtype=dtype),
+                "bias": torch.tensor([0.5], device=self.device, dtype=dtype),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
                 "N": N,
                 "C": C,
                 "eps": 1e-5,
@@ -85,10 +85,10 @@ class Challenge(ChallengeBase):
         N, C = 2, 2
         tests.append(
             {
-                "input": torch.zeros((N, C), device="cuda", dtype=dtype),
-                "weight": torch.ones(C, device="cuda", dtype=dtype),
-                "bias": torch.zeros(C, device="cuda", dtype=dtype),
-                "output": torch.empty((N, C), device="cuda", dtype=dtype),
+                "input": torch.zeros((N, C), device=self.device, dtype=dtype),
+                "weight": torch.ones(C, device=self.device, dtype=dtype),
+                "bias": torch.zeros(C, device=self.device, dtype=dtype),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
                 "N": N,
                 "C": C,
                 "eps": 1e-5,
@@ -106,12 +106,12 @@ class Challenge(ChallengeBase):
                         [0.0, 0.0, 0.0, 0.0],
                         [-2.0, 0.0, 2.0, 4.0],
                     ],
-                    device="cuda",
+                    device=self.device,
                     dtype=dtype,
                 ),
-                "weight": torch.tensor([1.0, 2.0, 1.0, 0.5], device="cuda", dtype=dtype),
-                "bias": torch.tensor([0.0, 0.0, 1.0, -1.0], device="cuda", dtype=dtype),
-                "output": torch.empty((N, C), device="cuda", dtype=dtype),
+                "weight": torch.tensor([1.0, 2.0, 1.0, 0.5], device=self.device, dtype=dtype),
+                "bias": torch.tensor([0.0, 0.0, 1.0, -1.0], device=self.device, dtype=dtype),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
                 "N": N,
                 "C": C,
                 "eps": 1e-5,
@@ -122,10 +122,10 @@ class Challenge(ChallengeBase):
         N, C = 8, 16
         tests.append(
             {
-                "input": torch.empty((N, C), device="cuda", dtype=dtype).uniform_(-5.0, 5.0),
-                "weight": torch.empty(C, device="cuda", dtype=dtype).uniform_(0.5, 2.0),
-                "bias": torch.empty(C, device="cuda", dtype=dtype).uniform_(-1.0, 1.0),
-                "output": torch.empty((N, C), device="cuda", dtype=dtype),
+                "input": torch.empty((N, C), device=self.device, dtype=dtype).uniform_(-5.0, 5.0),
+                "weight": torch.empty(C, device=self.device, dtype=dtype).uniform_(0.5, 2.0),
+                "bias": torch.empty(C, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
                 "N": N,
                 "C": C,
                 "eps": 1e-5,
@@ -136,10 +136,10 @@ class Challenge(ChallengeBase):
         N, C = 32, 64
         tests.append(
             {
-                "input": torch.empty((N, C), device="cuda", dtype=dtype).uniform_(-10.0, 10.0),
-                "weight": torch.empty(C, device="cuda", dtype=dtype).uniform_(0.5, 2.0),
-                "bias": torch.empty(C, device="cuda", dtype=dtype).uniform_(-2.0, 2.0),
-                "output": torch.empty((N, C), device="cuda", dtype=dtype),
+                "input": torch.empty((N, C), device=self.device, dtype=dtype).uniform_(-10.0, 10.0),
+                "weight": torch.empty(C, device=self.device, dtype=dtype).uniform_(0.5, 2.0),
+                "bias": torch.empty(C, device=self.device, dtype=dtype).uniform_(-2.0, 2.0),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
                 "N": N,
                 "C": C,
                 "eps": 1e-5,
@@ -150,10 +150,10 @@ class Challenge(ChallengeBase):
         N, C = 128, 256
         tests.append(
             {
-                "input": torch.empty((N, C), device="cuda", dtype=dtype).uniform_(-10.0, 10.0),
-                "weight": torch.empty(C, device="cuda", dtype=dtype).uniform_(0.5, 2.0),
-                "bias": torch.empty(C, device="cuda", dtype=dtype).uniform_(-2.0, 2.0),
-                "output": torch.empty((N, C), device="cuda", dtype=dtype),
+                "input": torch.empty((N, C), device=self.device, dtype=dtype).uniform_(-10.0, 10.0),
+                "weight": torch.empty(C, device=self.device, dtype=dtype).uniform_(0.5, 2.0),
+                "bias": torch.empty(C, device=self.device, dtype=dtype).uniform_(-2.0, 2.0),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
                 "N": N,
                 "C": C,
                 "eps": 1e-5,
@@ -164,10 +164,10 @@ class Challenge(ChallengeBase):
         N, C = 7, 30
         tests.append(
             {
-                "input": torch.empty((N, C), device="cuda", dtype=dtype).uniform_(-5.0, 5.0),
-                "weight": torch.ones(C, device="cuda", dtype=dtype),
-                "bias": torch.zeros(C, device="cuda", dtype=dtype),
-                "output": torch.empty((N, C), device="cuda", dtype=dtype),
+                "input": torch.empty((N, C), device=self.device, dtype=dtype).uniform_(-5.0, 5.0),
+                "weight": torch.ones(C, device=self.device, dtype=dtype),
+                "bias": torch.zeros(C, device=self.device, dtype=dtype),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
                 "N": N,
                 "C": C,
                 "eps": 1e-5,
@@ -178,10 +178,12 @@ class Challenge(ChallengeBase):
         N, C = 15, 100
         tests.append(
             {
-                "input": torch.empty((N, C), device="cuda", dtype=dtype).uniform_(-100.0, 100.0),
-                "weight": torch.empty(C, device="cuda", dtype=dtype).uniform_(0.1, 3.0),
-                "bias": torch.empty(C, device="cuda", dtype=dtype).uniform_(-5.0, 5.0),
-                "output": torch.empty((N, C), device="cuda", dtype=dtype),
+                "input": torch.empty((N, C), device=self.device, dtype=dtype).uniform_(
+                    -100.0, 100.0
+                ),
+                "weight": torch.empty(C, device=self.device, dtype=dtype).uniform_(0.1, 3.0),
+                "bias": torch.empty(C, device=self.device, dtype=dtype).uniform_(-5.0, 5.0),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
                 "N": N,
                 "C": C,
                 "eps": 1e-5,
@@ -192,10 +194,10 @@ class Challenge(ChallengeBase):
         N, C = 25, 255
         tests.append(
             {
-                "input": torch.empty((N, C), device="cuda", dtype=dtype).uniform_(-10.0, 10.0),
-                "weight": torch.empty(C, device="cuda", dtype=dtype).uniform_(0.5, 2.0),
-                "bias": torch.empty(C, device="cuda", dtype=dtype).uniform_(-1.0, 1.0),
-                "output": torch.empty((N, C), device="cuda", dtype=dtype),
+                "input": torch.empty((N, C), device=self.device, dtype=dtype).uniform_(-10.0, 10.0),
+                "weight": torch.empty(C, device=self.device, dtype=dtype).uniform_(0.5, 2.0),
+                "bias": torch.empty(C, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
                 "N": N,
                 "C": C,
                 "eps": 1e-5,
@@ -206,10 +208,10 @@ class Challenge(ChallengeBase):
         N, C = 512, 768
         tests.append(
             {
-                "input": torch.empty((N, C), device="cuda", dtype=dtype).uniform_(-5.0, 5.0),
-                "weight": torch.empty(C, device="cuda", dtype=dtype).uniform_(0.5, 2.0),
-                "bias": torch.empty(C, device="cuda", dtype=dtype).uniform_(-1.0, 1.0),
-                "output": torch.empty((N, C), device="cuda", dtype=dtype),
+                "input": torch.empty((N, C), device=self.device, dtype=dtype).uniform_(-5.0, 5.0),
+                "weight": torch.empty(C, device=self.device, dtype=dtype).uniform_(0.5, 2.0),
+                "bias": torch.empty(C, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
+                "output": torch.empty((N, C), device=self.device, dtype=dtype),
                 "N": N,
                 "C": C,
                 "eps": 1e-5,
@@ -222,10 +224,10 @@ class Challenge(ChallengeBase):
         dtype = torch.float32
         N, C = 65536, 512
         return {
-            "input": torch.empty((N, C), device="cuda", dtype=dtype).uniform_(-5.0, 10.0),
-            "weight": torch.empty(C, device="cuda", dtype=dtype).uniform_(0.5, 2.0),
-            "bias": torch.empty(C, device="cuda", dtype=dtype).uniform_(-1.0, 1.0),
-            "output": torch.empty((N, C), device="cuda", dtype=dtype),
+            "input": torch.empty((N, C), device=self.device, dtype=dtype).uniform_(-5.0, 10.0),
+            "weight": torch.empty(C, device=self.device, dtype=dtype).uniform_(0.5, 2.0),
+            "bias": torch.empty(C, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
+            "output": torch.empty((N, C), device=self.device, dtype=dtype),
             "N": N,
             "C": C,
             "eps": 1e-5,

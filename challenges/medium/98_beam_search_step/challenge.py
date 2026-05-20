@@ -6,14 +6,11 @@ from core.challenge_base import ChallengeBase
 
 
 class Challenge(ChallengeBase):
-    def __init__(self):
-        super().__init__(
-            name="Beam Search Step",
-            atol=1e-05,
-            rtol=1e-05,
-            num_gpus=1,
-            access_tier="free",
-        )
+    name = "Beam Search Step"
+    atol = 1e-05
+    rtol = 1e-05
+    num_gpus = 1
+    access_tier = "free"
 
     def reference_impl(
         self,
@@ -36,11 +33,13 @@ class Challenge(ChallengeBase):
         assert new_beam_scores.dtype == torch.float32
         assert parent_beam_indices.dtype == torch.int32
         assert next_tokens.dtype == torch.int32
-        assert beam_scores.device.type == "cuda"
-        assert token_logprobs.device.type == "cuda"
-        assert new_beam_scores.device.type == "cuda"
-        assert parent_beam_indices.device.type == "cuda"
-        assert next_tokens.device.type == "cuda"
+        assert (
+            beam_scores.device
+            == token_logprobs.device
+            == new_beam_scores.device
+            == parent_beam_indices.device
+            == next_tokens.device
+        )
 
         candidates = beam_scores.unsqueeze(-1) + token_logprobs
         flat = candidates.view(B, K * V)
@@ -71,7 +70,7 @@ class Challenge(ChallengeBase):
         logprob_scale: float = 2.0,
         zero_beam_scores: bool = False,
     ) -> Dict[str, Any]:
-        device = "cuda"
+        device = self.device
         torch.manual_seed(seed)
         if zero_beam_scores:
             beam_scores = torch.zeros((B, K), device=device, dtype=torch.float32)
@@ -90,7 +89,7 @@ class Challenge(ChallengeBase):
         }
 
     def generate_example_test(self) -> Dict[str, Any]:
-        device = "cuda"
+        device = self.device
         beam_scores = torch.tensor(
             [[-0.5, -1.0]],
             device=device,

@@ -6,14 +6,11 @@ from core.challenge_base import ChallengeBase
 
 
 class Challenge(ChallengeBase):
-    def __init__(self):
-        super().__init__(
-            name="Adaptive Layer Normalization",
-            atol=1e-04,
-            rtol=1e-04,
-            num_gpus=1,
-            access_tier="free",
-        )
+    name = "Adaptive Layer Normalization"
+    atol = 1e-04
+    rtol = 1e-04
+    num_gpus = 1
+    access_tier = "free"
 
     def reference_impl(
         self,
@@ -28,12 +25,7 @@ class Challenge(ChallengeBase):
         assert X.shape == output.shape == (B, N, D)
         assert scale.shape == shift.shape == (B, D)
         assert X.dtype == scale.dtype == shift.dtype == output.dtype
-        assert (
-            X.device.type == "cuda"
-            and scale.device.type == "cuda"
-            and shift.device.type == "cuda"
-            and output.device.type == "cuda"
-        )
+        assert X.device == scale.device == shift.device == output.device
 
         eps = 1e-5
         mean = X.mean(dim=-1, keepdim=True)
@@ -57,12 +49,12 @@ class Challenge(ChallengeBase):
         B, N, D = 1, 2, 4
         X = torch.tensor(
             [[[1.0, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]]],
-            device="cuda",
+            device=self.device,
             dtype=dtype,
         )
-        scale = torch.tensor([[0.0, 1.0, 0.0, -0.5]], device="cuda", dtype=dtype)
-        shift = torch.tensor([[0.0, 0.0, 1.0, 0.0]], device="cuda", dtype=dtype)
-        output = torch.empty((B, N, D), device="cuda", dtype=dtype)
+        scale = torch.tensor([[0.0, 1.0, 0.0, -0.5]], device=self.device, dtype=dtype)
+        shift = torch.tensor([[0.0, 0.0, 1.0, 0.0]], device=self.device, dtype=dtype)
+        output = torch.empty((B, N, D), device=self.device, dtype=dtype)
         return {
             "X": X,
             "scale": scale,
@@ -76,16 +68,16 @@ class Challenge(ChallengeBase):
     def _make_test(self, B: int, N: int, D: int, fill: str = "uniform") -> Dict[str, Any]:
         dtype = torch.float32
         if fill == "zeros":
-            X = torch.zeros((B, N, D), device="cuda", dtype=dtype)
+            X = torch.zeros((B, N, D), device=self.device, dtype=dtype)
         elif fill == "negative":
-            X = torch.empty((B, N, D), device="cuda", dtype=dtype).uniform_(-5.0, -0.1)
+            X = torch.empty((B, N, D), device=self.device, dtype=dtype).uniform_(-5.0, -0.1)
         elif fill == "mixed":
-            X = torch.empty((B, N, D), device="cuda", dtype=dtype).uniform_(-3.0, 3.0)
+            X = torch.empty((B, N, D), device=self.device, dtype=dtype).uniform_(-3.0, 3.0)
         else:
-            X = torch.empty((B, N, D), device="cuda", dtype=dtype).uniform_(-1.0, 1.0)
-        scale = torch.empty((B, D), device="cuda", dtype=dtype).uniform_(-0.5, 0.5)
-        shift = torch.empty((B, D), device="cuda", dtype=dtype).uniform_(-0.5, 0.5)
-        output = torch.empty((B, N, D), device="cuda", dtype=dtype)
+            X = torch.empty((B, N, D), device=self.device, dtype=dtype).uniform_(-1.0, 1.0)
+        scale = torch.empty((B, D), device=self.device, dtype=dtype).uniform_(-0.5, 0.5)
+        shift = torch.empty((B, D), device=self.device, dtype=dtype).uniform_(-0.5, 0.5)
+        output = torch.empty((B, N, D), device=self.device, dtype=dtype)
         return {
             "X": X,
             "scale": scale,
