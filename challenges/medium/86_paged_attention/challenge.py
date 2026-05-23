@@ -7,14 +7,11 @@ from core.challenge_base import ChallengeBase
 
 
 class Challenge(ChallengeBase):
-    def __init__(self):
-        super().__init__(
-            name="Paged KV-Cache Attention",
-            atol=1e-04,
-            rtol=1e-04,
-            num_gpus=1,
-            access_tier="free",
-        )
+    name = "Paged KV-Cache Attention"
+    atol = 1e-04
+    rtol = 1e-04
+    num_gpus = 1
+    access_tier = "free"
 
     def reference_impl(
         self,
@@ -40,12 +37,6 @@ class Challenge(ChallengeBase):
         assert output.shape == (batch_size, num_heads, head_dim)
         assert Q.dtype == K_cache.dtype == V_cache.dtype == output.dtype == torch.float32
         assert block_table.dtype == context_lens.dtype == torch.int32
-        assert Q.device.type == "cuda"
-        assert K_cache.device.type == "cuda"
-        assert V_cache.device.type == "cuda"
-        assert block_table.device.type == "cuda"
-        assert context_lens.device.type == "cuda"
-        assert output.device.type == "cuda"
 
         scale = 1.0 / math.sqrt(head_dim)
 
@@ -108,7 +99,7 @@ class Challenge(ChallengeBase):
         # Allocate exactly the blocks needed, assigned sequentially
         total_blocks = sum((cl + block_size - 1) // block_size for cl in context_lens)
 
-        device = "cuda"
+        device = self.device
         dtype = torch.float32
 
         if zero_q:
@@ -151,7 +142,7 @@ class Challenge(ChallengeBase):
         }
 
     def generate_example_test(self) -> Dict[str, Any]:
-        device = "cuda"
+        device = self.device
         dtype = torch.float32
 
         # batch=1, heads=1, head_dim=4, block_size=2, ctx_len=2
