@@ -7,14 +7,11 @@ from core.challenge_base import ChallengeBase
 
 
 class Challenge(ChallengeBase):
-    def __init__(self):
-        super().__init__(
-            name="Decode-Phase Attention",
-            atol=1e-04,
-            rtol=1e-04,
-            num_gpus=1,
-            access_tier="free",
-        )
+    name = "Decode-Phase Attention"
+    atol = 1e-04
+    rtol = 1e-04
+    num_gpus = 1
+    access_tier = "free"
 
     def reference_impl(
         self,
@@ -33,10 +30,6 @@ class Challenge(ChallengeBase):
         assert V.shape == (batch_size, num_kv_heads, cache_len, head_dim)
         assert output.shape == (batch_size, num_q_heads, head_dim)
         assert Q.dtype == K.dtype == V.dtype == output.dtype == torch.float32
-        assert Q.device.type == "cuda"
-        assert K.device.type == "cuda"
-        assert V.device.type == "cuda"
-        assert output.device.type == "cuda"
         assert num_q_heads % num_kv_heads == 0
 
         scale = 1.0 / math.sqrt(head_dim)
@@ -80,7 +73,7 @@ class Challenge(ChallengeBase):
         zero_inputs=False,
     ):
         dtype = torch.float32
-        device = "cuda"
+        device = self.device
         if zero_inputs:
             Q = torch.zeros(batch_size, num_q_heads, head_dim, device=device, dtype=dtype)
             K = torch.zeros(
@@ -112,7 +105,7 @@ class Challenge(ChallengeBase):
 
     def generate_example_test(self) -> Dict[str, Any]:
         dtype = torch.float32
-        device = "cuda"
+        device = self.device
         Q = torch.tensor(
             [[[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]]],
             device=device,
