@@ -7,14 +7,11 @@ from core.challenge_base import ChallengeBase
 
 
 class Challenge(ChallengeBase):
-    def __init__(self):
-        super().__init__(
-            name="Flash Attention Forward",
-            atol=1e-03,
-            rtol=1e-03,
-            num_gpus=1,
-            access_tier="free",
-        )
+    name = "Flash Attention Forward"
+    atol = 1e-03
+    rtol = 1e-03
+    num_gpus = 1
+    access_tier = "free"
 
     def reference_impl(
         self,
@@ -31,10 +28,6 @@ class Challenge(ChallengeBase):
         assert V.shape == (num_heads, seq_len, head_dim)
         assert output.shape == (num_heads, seq_len, head_dim)
         assert Q.dtype == K.dtype == V.dtype == output.dtype == torch.float32
-        assert Q.device.type == "cuda"
-        assert K.device.type == "cuda"
-        assert V.device.type == "cuda"
-        assert output.device.type == "cuda"
 
         scale = 1.0 / math.sqrt(head_dim)
         # scores: (num_heads, seq_len, seq_len)
@@ -54,7 +47,7 @@ class Challenge(ChallengeBase):
         }
 
     def _make_test_case(self, num_heads, seq_len, head_dim, zero_inputs=False):
-        device = "cuda"
+        device = self.device
         dtype = torch.float32
         if zero_inputs:
             Q = torch.zeros(num_heads, seq_len, head_dim, device=device, dtype=dtype)
@@ -76,7 +69,7 @@ class Challenge(ChallengeBase):
         }
 
     def generate_example_test(self) -> Dict[str, Any]:
-        device = "cuda"
+        device = self.device
         dtype = torch.float32
         Q = torch.tensor(
             [[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]],
