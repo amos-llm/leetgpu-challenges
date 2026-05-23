@@ -22,6 +22,7 @@ __global__ void sum_kernel(const float* input, float* output, int N) {
 
 // input, output are device pointers
 extern "C" void solve(const float* input, float* output, int N) {
+    cudaMemset(output, 0, sizeof(float));
     constexpr int kBlockSize = 256;
     constexpr int kItemsPerThread = 4;
     constexpr int kItemsPerBlock = kBlockSize * kItemsPerThread;
