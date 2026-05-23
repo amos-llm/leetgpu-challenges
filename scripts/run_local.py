@@ -37,6 +37,7 @@ import importlib.util
 import inspect
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -268,21 +269,22 @@ def run_python_solution(
         # solver returned something; assume it's the primary output
         result_out_key = out_keys[0] if out_keys else "C"
         result[result_out_key] = ret
-    else:
-        # take the argument object(s) corresponding to out_keys
-        if out_keys:
-            # match parameter names to positions
-            sig = inspect.signature(solve)
-            param_names = list(sig.parameters.keys())
-            name_to_idx = {pn.lower(): i for i, pn in enumerate(param_names)}
-            for ok in out_keys:
-                idx = name_to_idx.get(ok.lower())
-                if idx is not None:
-                    result[ok] = ordered_args[idx]
-        else:
-            # best-effort: assume last arg is output
-            result_key = list(test_case.keys())[-1]
-            result[result_key] = ordered_args[-1]
+
+    # take the argument object(s) corresponding to out_keys (incl. inout)
+    if out_keys:
+        sig = inspect.signature(solve)
+        param_names = list(sig.parameters.keys())
+        name_to_idx = {pn.lower(): i for i, pn in enumerate(param_names)}
+        for ok in out_keys:
+            if ok in result:
+                continue
+            idx = name_to_idx.get(ok.lower())
+            if idx is not None:
+                result[ok] = ordered_args[idx]
+    elif ret is None:
+        # best-effort: assume last arg is output
+        result_key = list(test_case.keys())[-1]
+        result[result_key] = ordered_args[-1]
 
     # For CuteDSL, map cute tensors back to original torch tensors for comparison
     if framework == "cute" and cute_tensor_map:
@@ -421,85 +423,80 @@ def run_cuda_solution(
     If `lib` is None this function will compile the solution into a new temp build
     dir and load it.
     """
-    try:
-        key = str(solution_cu.resolve())
-        if lib is None and key in _cuda_lib_cache:
-            cached_lib, cached_mtime = _cuda_lib_cache[key]
-            if cached_mtime >= solution_cu.stat().st_mtime:
-                lib = cached_lib
+    key = str(solution_cu.resolve())
+    if lib is None and key in _cuda_lib_cache:
+        cached_lib, cached_mtime = _cuda_lib_cache[key]
+        if cached_mtime >= solution_cu.stat().st_mtime:
+            lib = cached_lib
 
-        if lib is None:
-            so = compile_cuda_shared(solution_cu)
-            lib = ctypes.CDLL(str(so))
-            # cache the loaded library for future runs in this process
-            _cuda_lib_cache[key] = (lib, solution_cu.stat().st_mtime)
+    if lib is None:
+        so = compile_cuda_shared(solution_cu)
+        lib = ctypes.CDLL(str(so))
+        # cache the loaded library for future runs in this process
+        _cuda_lib_cache[key] = (lib, solution_cu.stat().st_mtime)
 
-        # get signature mapping from challenge
-        sig_map = challenge.get_solve_signature()
-        # order arguments by signature keys ordering (preserve insertion order)
-        arg_names = list(sig_map.keys())
+    # get signature mapping from challenge
+    sig_map = challenge.get_solve_signature()
+    # order arguments by signature keys ordering (preserve insertion order)
+    arg_names = list(sig_map.keys())
 
-        # Prepare args for call (use lower-case map for fast lookup)
-        lower_map = {k.lower(): (k, v) for k, v in test_case.items()}
-        call_args = []
-        for name in arg_names:
-            entry = lower_map.get(name.lower())
-            if entry is None:
-                raise KeyError(f"Missing parameter {name} for CUDA solution")
-            orig_key, val = entry
+    # Prepare args for call (use lower-case map for fast lookup)
+    lower_map = {k.lower(): (k, v) for k, v in test_case.items()}
+    call_args = []
+    for name in arg_names:
+        entry = lower_map.get(name.lower())
+        if entry is None:
+            raise KeyError(f"Missing parameter {name} for CUDA solution")
+        orig_key, val = entry
 
-            ctype_spec, direction = sig_map[name]
-            # If tensor: pass device pointer
-            if hasattr(val, "device"):
-                # ensure it's on CUDA
-                if str(val.device).startswith("cuda"):
-                    ptr = val.data_ptr()
-                else:
-                    # move to cuda and update map so outputs point to the CUDA tensor
-                    v = val.cuda()
-                    lower_map[name.lower()] = (orig_key, v)
-                    ptr = v.data_ptr()
-                call_args.append(ctypes.c_void_p(ptr))
+        ctype_spec, direction = sig_map[name]
+        # If tensor: pass device pointer
+        if hasattr(val, "device"):
+            # ensure it's on CUDA
+            if str(val.device).startswith("cuda"):
+                ptr = val.data_ptr()
             else:
-                # Handle scalar (non-tensor) args according to the declared ctype_spec
-                # so they are passed with the correct calling convention.
-                try:
-                    # Common scalar ctypes handled explicitly
-                    if ctype_spec is ctypes.c_float:
-                        call_args.append(ctypes.c_float(val))
-                    elif ctype_spec is ctypes.c_double:
+                # move to cuda and update map so outputs point to the CUDA tensor
+                v = val.cuda()
+                lower_map[name.lower()] = (orig_key, v)
+                ptr = v.data_ptr()
+            call_args.append(ctypes.c_void_p(ptr))
+        else:
+            # Handle scalar (non-tensor) args according to the declared ctype_spec
+            # so they are passed with the correct calling convention.
+            try:
+                # Common scalar ctypes handled explicitly
+                if ctype_spec is ctypes.c_float:
+                    call_args.append(ctypes.c_float(val))
+                elif ctype_spec is ctypes.c_double:
+                    call_args.append(ctypes.c_double(val))
+                elif ctype_spec is ctypes.c_int:
+                    call_args.append(ctypes.c_int(int(val)))
+                elif ctype_spec is ctypes.c_size_t:
+                    call_args.append(ctypes.c_size_t(int(val)))
+                else:
+                    # Fallback: choose reasonable wrapper based on Python type
+                    if isinstance(val, float):
                         call_args.append(ctypes.c_double(val))
-                    elif ctype_spec is ctypes.c_int:
-                        call_args.append(ctypes.c_int(int(val)))
-                    elif ctype_spec is ctypes.c_size_t:
-                        call_args.append(ctypes.c_size_t(int(val)))
                     else:
-                        # Fallback: choose reasonable wrapper based on Python type
-                        if isinstance(val, float):
-                            call_args.append(ctypes.c_double(val))
-                        else:
-                            call_args.append(ctypes.c_int(int(val)))
-                except Exception:
-                    # As a last resort, pass the raw int value
-                    call_args.append(int(val))
+                        call_args.append(ctypes.c_int(int(val)))
+            except Exception:
+                # As a last resort, pass the raw int value
+                call_args.append(int(val))
 
-        # call function
-        func = lib.solve
-        # call via ctypes using *call_args
-        func(*call_args)
+    # call function
+    func = lib.solve
+    # call via ctypes using *call_args
+    func(*call_args)
 
-        # extract outputs according to sig_map where direction is 'out' or 'inout'
-        outs: Dict[str, Any] = {}
-        for name, (_, direction) in sig_map.items():
-            if direction in ("out", "inout"):
-                entry = lower_map.get(name.lower())
-                if entry is not None:
-                    outs[name] = entry[1]
-        return outs
-    finally:
-        # leave build dir and lib loaded for inspection while process is running;
-        # cleanup is registered via atexit
-        pass
+    # extract outputs according to sig_map where direction is 'out' or 'inout'
+    outs: Dict[str, Any] = {}
+    for name, (_, direction) in sig_map.items():
+        if direction in ("out", "inout"):
+            entry = lower_map.get(name.lower())
+            if entry is not None:
+                outs[name] = entry[1]
+    return outs
 
 
 def _unwrap_list_tuple(actual):
@@ -706,7 +703,7 @@ def get_mismatch_details(
             if len(exp_list) != len(act_list):
                 lines.append(
                     f"  extra expected tail={exp_list[nshow:]}, "
-                    "extra actual tail={act_list[nshow:]}"
+                    f"extra actual tail={act_list[nshow:]}"
                 )
             return lines
 
@@ -975,6 +972,68 @@ def run_single_challenge(
     return overall_exit
 
 
+def _visible_len(s: str) -> int:
+    """Return display width of a string, stripping ANSI escape codes."""
+    return len(re.sub(r"\x1b\[[0-9;]*m", "", s))
+
+
+def _print_cross_framework_table(
+    all_dirs: List[Path],
+    results: Dict[Path, Dict[str, str]],
+    frameworks: List[str],
+) -> None:
+    """Print a colorized ASCII table of challenge × framework results."""
+    labels = [f"{d.parent.name}/{d.name}" for d in all_dirs]
+    # column widths
+    label_width = max(len(label) for label in labels) if labels else 0
+    fw_widths = [max(len(fw), 6) for fw in frameworks]
+
+    # header
+    header_parts = [f"{'Challenge':<{label_width}}"]
+    for fw, w in zip(frameworks, fw_widths):
+        header_parts.append(f"{fw:^{w}}")
+    header = " | ".join(header_parts)
+    sep = "-+-".join(["-" * label_width] + ["-" * w for w in fw_widths])
+    print("\n" + header)
+    print(sep)
+
+    # rows
+    for d, label in zip(all_dirs, labels):
+        row_parts = [f"{label:<{label_width}}"]
+        for fw, w in zip(frameworks, fw_widths):
+            status = results.get(d, {}).get(fw, "SKIP")
+            if status == "PASS":
+                cell = f"{GREEN}{'PASS':^{w}}{RESET}"
+            elif status == "FAIL":
+                cell = f"{RED}{'FAIL':^{w}}{RESET}"
+            else:
+                cell = f"{YELLOW}{'SKIP':^{w}}{RESET}"
+            row_parts.append(cell)
+        print(" | ".join(row_parts))
+
+    # overall summary row
+    print(sep)
+    summary_parts = [f"{'Total':<{label_width}}"]
+    for fw, w in zip(frameworks, fw_widths):
+        total_pass = sum(1 for d in all_dirs if results.get(d, {}).get(fw) == "PASS")
+        total_fail = sum(1 for d in all_dirs if results.get(d, {}).get(fw) == "FAIL")
+        total_skip = sum(1 for d in all_dirs if results.get(d, {}).get(fw) in (None, "SKIP"))
+        txt = f"P:{total_pass} F:{total_fail} S:{total_skip}"
+        summary_parts.append(f"{txt:^{w}}")
+    print(" | ".join(summary_parts))
+
+    # cross-framework "at least one pass" row
+    cross_parts = [f"{'Any pass':<{label_width}}"]
+    any_pass = sum(
+        1 for d in all_dirs if any(results.get(d, {}).get(fw) == "PASS" for fw in frameworks)
+    )
+    any_pass_txt = f"{any_pass}/{len(all_dirs)}"
+    cross_parts.append(f"{any_pass_txt:^{fw_widths[0]}}")
+    cross_parts.extend([" " * w for w in fw_widths[1:]])
+    print(" | ".join(cross_parts))
+    print()
+
+
 def run_all_challenges(
     args,
     frameworks: List[str],
@@ -1015,9 +1074,14 @@ def run_all_challenges(
         logger.error("No challenges found under %s", challenges_root)
         return 2
 
+    # Initialize cross-framework results
+    results: Dict[Path, Dict[str, str]] = {d: {} for d in all_dirs}
+
     # Run requested frameworks one-by-one.
     failures: List[Tuple[Path, int]] = []
     total_run = 0
+    total_work = len(frameworks) * len(all_dirs)
+    completed = 0
     for framework in frameworks:
         logger.info("Running framework: %s", framework)
         # Filter out challenges that don't have a solution for this framework.
@@ -1029,26 +1093,40 @@ def run_all_challenges(
                 valid_dirs.append(d)
             except FileNotFoundError:
                 skipped_dirs.append(d)
+                results[d][framework] = "SKIP"
             except ValueError:
                 logger.error("Unsupported framework: %s", framework)
                 return 2
 
         # Compute a consistent label column width for aligned summary output.
         label_width = 0
-        if args.summary:
+        if args.summary or args.cross_framework_table:
             try:
                 all_labels = [f"{d.parent.name}/{d.name}" for d in (valid_dirs + skipped_dirs)]
                 label_width = max(len(name) for name in all_labels) if all_labels else 0
             except Exception:
                 label_width = 0
 
-        if skipped_dirs:
+        if skipped_dirs and not args.cross_framework_table:
             skipped_labels = [f"{d.parent.name}/{d.name}" for d in skipped_dirs]
             for label in skipped_labels:
                 logger.info("%-*s | %sSKIPPED%s", label_width, label, YELLOW, RESET)
 
+        if skipped_dirs and args.cross_framework_table:
+            for d in skipped_dirs:
+                completed += 1
+                label = f"{d.parent.name}/{d.name}"
+                logger.info(
+                    "Progress %d/%d | %s %s -> SKIP",
+                    completed,
+                    total_work,
+                    framework,
+                    label,
+                )
+
         for ch in valid_dirs:
             total_run += 1
+            label = f"{ch.parent.name}/{ch.name}"
             cmd = [
                 sys.executable,
                 str(Path(__file__)),
@@ -1067,13 +1145,15 @@ def run_all_challenges(
 
             # Set environment variable to indicate summary mode
             env = os.environ.copy()
-            if args.summary:
+            if args.summary or args.cross_framework_table:
                 env["RUN_LOCAL_SUMMARY_MODE"] = "1"
 
-            label = f"{ch.parent.name}/{ch.name}"
+            # When cross-framework table is requested, always run in summary mode
+            # (capture output) and suppress per-challenge logs.
+            use_summary = args.summary or args.cross_framework_table
 
             # Summary mode: capture full output and print only a compact summary
-            if args.summary:
+            if use_summary:
                 try:
                     proc = subprocess.Popen(
                         cmd,
@@ -1083,19 +1163,51 @@ def run_all_challenges(
                         env=env,
                     )
                 except Exception as e:
-                    logger.info("Failed to start subprocess for %s: %s", ch, e)
+                    if not args.cross_framework_table:
+                        logger.info("Failed to start subprocess for %s: %s", ch, e)
+                    results[ch][framework] = "FAIL"
                     failures.append((ch, 1))
+                    completed += 1
+                    if args.cross_framework_table:
+                        logger.info(
+                            "Progress %d/%d | %s %s -> FAIL (spawn error)",
+                            completed,
+                            total_work,
+                            framework,
+                            label,
+                        )
                     continue
 
                 _, _ = proc.communicate()
                 rc = proc.returncode
-                display_w = max(label_width, len(label))
+                completed += 1
+                if not args.cross_framework_table:
+                    display_w = max(label_width, len(label))
+                    if rc == 0:
+                        logger.info("%-*s | %sPASSED%s", display_w, label, GREEN, RESET)
+                    else:
+                        logger.info("%-*s | %sFAILED%s", display_w, label, RED, RESET)
                 if rc == 0:
-                    logger.info("%-*s | %sPASSED%s", display_w, label, GREEN, RESET)
+                    results[ch][framework] = "PASS"
+                    if args.cross_framework_table:
+                        logger.info(
+                            "Progress %d/%d | %s %s -> PASS",
+                            completed,
+                            total_work,
+                            framework,
+                            label,
+                        )
                 else:
-                    logger.info("%-*s | %sFAILED%s", display_w, label, RED, RESET)
-                if rc != 0:
+                    results[ch][framework] = "FAIL"
                     failures.append((ch, rc))
+                    if args.cross_framework_table:
+                        logger.info(
+                            "Progress %d/%d | %s %s -> FAIL",
+                            completed,
+                            total_work,
+                            framework,
+                            label,
+                        )
                 continue
 
             # Non-summary: stream and prefix child output lines
@@ -1110,6 +1222,7 @@ def run_all_challenges(
                 )
             except Exception as e:
                 logger.info("Failed to start subprocess for %s: %s", ch, e)
+                results[ch][framework] = "FAIL"
                 failures.append((ch, 1))
                 continue
 
@@ -1127,8 +1240,15 @@ def run_all_challenges(
                     pass
 
             rc = proc.wait()
-            if rc != 0:
+            if rc == 0:
+                results[ch][framework] = "PASS"
+            else:
+                results[ch][framework] = "FAIL"
                 failures.append((ch, rc))
+
+    # Print cross-framework table if requested
+    if args.cross_framework_table:
+        _print_cross_framework_table(all_dirs, results, frameworks)
 
     passed = total_run - len(failures)
     logger.info("-" * 64)
@@ -1209,6 +1329,15 @@ def main(argv: List[str] | None = None) -> int:
         help=(
             "Print compact per-challenge summaries during --all-challenges "
             "(show output only on failures)"
+        ),
+    )
+    parser.add_argument(
+        "--cross-framework-table",
+        action="store_true",
+        dest="cross_framework_table",
+        help=(
+            "After running all frameworks, print a cross-framework completion table "
+            "(challenge rows × framework columns). Implies summary mode for each run."
         ),
     )
     args = parser.parse_args(argv)
