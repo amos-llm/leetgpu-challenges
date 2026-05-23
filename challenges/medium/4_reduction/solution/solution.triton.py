@@ -14,6 +14,7 @@ def sum_kernel(input, output, N, BLOCK_SIZE: tl.constexpr):
 
 # input, output are tensors on the GPU
 def solve(input: torch.Tensor, output: torch.Tensor, N: int):
+    output.zero_()
     BLOCK_SIZE = 1024
     grid = (triton.cdiv(N, BLOCK_SIZE),)
     sum_kernel[grid](input, output, N, BLOCK_SIZE)
