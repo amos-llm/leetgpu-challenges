@@ -1,0 +1,229 @@
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+<p>
+  Implement <strong>causal self-attention over a paged KV cache</strong> for a packed batch of
+  variable-length sequences. This is the prefill-phase kernel used by serving engines such as
+  vLLM and FlashAttention when sequences are stored in a non-contiguous block pool and each
+  sequence may contain multiple query tokens.
+</p>
+<p>
+  The query tensor <code>Q</code> has shape <code>T &times; num_heads &times; head_dim</code>, where
+  <code>T</code> is the total number of tokens across all sequences packed end-to-end.
+  The 1D tensor <code>cu_seqlens</code> of shape <code>S + 1</code> stores cumulative sequence
+  lengths, so sequence <code>s</code> occupies rows
+  <code>[cu_seqlens[s], cu_seqlens[s+1])</code> in <code>Q</code> and <code>output</code>.
+</p>
+<p>
+  The key and value caches are stored in fixed-size <em>blocks</em> (pages) indexed by
+  <code>block_table</code>. For sequence <code>s</code> with length <code>L</code>, the KV tokens
+  are gathered from <code>ceil(L / block_size)</code> physical blocks pointed to by
+  <code>block_table[s]</code>. Only the first <code>L</code> tokens within those blocks are valid;
+  any remaining slots in the final block are padding.
+</p>
+<p>
+  For each token at packed position <code>t</code> belonging to sequence <code>s</code> with
+  local position <code>p = t &minus; cu_seqlens[s]</code>, attention is restricted to KV tokens
+  of the same sequence at positions <code>0, 1, &hellip;, p</code> (causal). Concretely:
+</p>
+<p>
+  \[
+    \text{scores}[t, u] =
+    \begin{cases}
+      \dfrac{Q[t] \cdot K_{\text{gathered}}[u]}{\sqrt{head\_dim}} & \text{if } u \text{ is in the same sequence as } t
+                                                   \text{ and } u \text{ is at or before } t, \\[4pt]
+      -\infty & \text{otherwise.}
+    \end{cases}
+  \]
+  \[
+    \text{output}[t] = \sum_{u} \text{softmax}(\text{scores}[t])[u] \cdot V_{\text{gathered}}[u].
+  \]
+</p>
+
+<svg width="720" height="300" viewBox="0 0 720 300" xmlns="http://www.w3.org/2000/svg"
+     style="display:block; margin:20px auto;">
+  <rect width="720" height="300" fill="#222" rx="8"/>
+
+  <text x="360" y="22" text-anchor="middle" fill="#ccc" font-size="12" font-family="monospace">
+    Packed Q + Paged KV Cache  (S = 2, cu_seqlens = [0, 2, 3], block_size = 16)
+  </text>
+
+  <!-- Packed Q tokens -->
+  <text x="55" y="50" text-anchor="middle" fill="#888" font-size="11" font-family="monospace">Packed Q</text>
+
+  <rect x="20" y="62" width="70" height="26" fill="#1a4a8a" stroke="#4a8abf" rx="3"/>
+  <text x="55" y="80" text-anchor="middle" fill="#ccc" font-size="10" font-family="monospace">q0 (s0)</text>
+
+  <rect x="20" y="92" width="70" height="26" fill="#1a4a8a" stroke="#4a8abf" rx="3"/>
+  <text x="55" y="110" text-anchor="middle" fill="#ccc" font-size="10" font-family="monospace">q1 (s0)</text>
+
+  <rect x="20" y="122" width="70" height="26" fill="#2a7ec0" stroke="#52b788" rx="3"/>
+  <text x="55" y="140" text-anchor="middle" fill="#ccc" font-size="10" font-family="monospace">q2 (s1)</text>
+
+  <!-- Arrow to block tables -->
+  <line x1="100" y1="75" x2="140" y2="75" stroke="#4a8abf" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="100" y1="105" x2="140" y2="105" stroke="#4a8abf" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="100" y1="135" x2="140" y2="135" stroke="#52b788" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+  <!-- Block tables -->
+  <text x="185" y="50" text-anchor="middle" fill="#888" font-size="11" font-family="monospace">block_table</text>
+
+  <rect x="150" y="62" width="70" height="26" fill="#2a3a4a" stroke="#4a8abf" rx="3"/>
+  <text x="185" y="80" text-anchor="middle" fill="#4a8abf" font-size="10" font-family="monospace">[0]</text>
+
+  <rect x="150" y="122" width="70" height="26" fill="#2a4a38" stroke="#52b788" rx="3"/>
+  <text x="185" y="140" text-anchor="middle" fill="#52b788" font-size="10" font-family="monospace">[1]</text>
+
+  <!-- Arrows to physical blocks -->
+  <line x1="225" y1="75" x2="270" y2="75" stroke="#4a8abf" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="225" y1="135" x2="270" y2="135" stroke="#52b788" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+  <!-- Physical KV cache blocks -->
+  <text x="345" y="50" text-anchor="middle" fill="#888" font-size="11" font-family="monospace">K_cache / V_cache</text>
+
+  <rect x="280" y="62" width="60" height="26" fill="#1a3a5a" stroke="#4a8abf" rx="3"/>
+  <text x="310" y="80" text-anchor="middle" fill="#ccc" font-size="10" font-family="monospace">blk 0</text>
+
+  <rect x="280" y="92" width="60" height="26" fill="#1a3a5a" stroke="#4a8abf" rx="3"/>
+  <text x="310" y="110" text-anchor="middle" fill="#ccc" font-size="10" font-family="monospace">blk 0</text>
+
+  <rect x="280" y="122" width="60" height="26" fill="#1a5a3a" stroke="#52b788" rx="3"/>
+  <text x="310" y="140" text-anchor="middle" fill="#ccc" font-size="10" font-family="monospace">blk 1</text>
+
+  <!-- Causal mask boxes -->
+  <text x="520" y="50" text-anchor="middle" fill="#888" font-size="11" font-family="monospace">Causal attention per sequence</text>
+
+  <!-- Seq 0 mask (2x2 lower triangular) -->
+  <rect x="400" y="62" width="34" height="28" fill="#1a4a8a" stroke="#333"/>
+  <rect x="435" y="62" width="34" height="28" fill="#161616" stroke="#333"/>
+  <rect x="400" y="92" width="34" height="28" fill="#1a4a8a" stroke="#333"/>
+  <rect x="435" y="92" width="34" height="28" fill="#1a4a8a" stroke="#333"/>
+
+  <text x="420" y="140" text-anchor="middle" fill="#4a8abf" font-size="10" font-family="monospace">seq 0</text>
+
+  <!-- Seq 1 mask (1x1) -->
+  <rect x="490" y="62" width="34" height="28" fill="#2a7ec0" stroke="#333"/>
+  <text x="510" y="140" text-anchor="middle" fill="#52b788" font-size="10" font-family="monospace">seq 1</text>
+
+  <!-- Legend -->
+  <rect x="560" y="62" width="18" height="18" fill="#1a4a8a" stroke="#333"/>
+  <text x="585" y="76" fill="#ccc" font-size="10" font-family="monospace">allowed</text>
+
+  <rect x="560" y="92" width="18" height="18" fill="#161616" stroke="#333"/>
+  <text x="585" y="106" fill="#ccc" font-size="10" font-family="monospace">masked (&minus;&infin;)</text>
+
+  <text x="560" y="140" fill="#888" font-size="9" font-family="monospace">A query only sees KV tokens</text>
+  <text x="560" y="155" fill="#888" font-size="9" font-family="monospace">in its own sequence, up to</text>
+  <text x="560" y="170" fill="#888" font-size="9" font-family="monospace">its local position.</text>
+
+  <!-- Bottom explanation -->
+  <text x="360" y="210" text-anchor="middle" fill="#ccc" font-size="11" font-family="monospace">
+    q0 (s0, pos 0) attends to KV blk 0, token 0
+  </text>
+  <text x="360" y="230" text-anchor="middle" fill="#ccc" font-size="11" font-family="monospace">
+    q1 (s0, pos 1) attends to KV blk 0, tokens 0..1
+  </text>
+  <text x="360" y="250" text-anchor="middle" fill="#ccc" font-size="11" font-family="monospace">
+    q2 (s1, pos 0) attends to KV blk 1, token 0
+  </text>
+
+  <defs>
+    <marker id="arr" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#4a8abf"/>
+    </marker>
+    <marker id="arr2" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#52b788"/>
+    </marker>
+  </defs>
+</svg>
+
+<h2>Implementation Requirements</h2>
+<p>
+  Implement the function <code>solve(Q, K_cache, V_cache, block_table, cu_seqlens, output, T, num_heads, head_dim, block_size, max_blocks_per_seq, S)</code>
+  that computes causal attention over a paged KV cache for a packed batch:
+</p>
+<ul>
+  <li><code>Q</code>: query tensor of shape <code>(T, num_heads, head_dim)</code>, dtype <code>float32</code></li>
+  <li><code>K_cache</code>: paged key cache of shape <code>(num_blocks, block_size, num_heads, head_dim)</code>, dtype <code>float32</code></li>
+  <li><code>V_cache</code>: paged value cache of shape <code>(num_blocks, block_size, num_heads, head_dim)</code>, dtype <code>float32</code></li>
+  <li><code>block_table</code>: physical block indices of shape <code>(S, max_blocks_per_seq)</code>, dtype <code>int32</code></li>
+  <li><code>cu_seqlens</code>: cumulative sequence lengths of shape <code>(S + 1,)</code>, dtype <code>int32</code>, with <code>cu_seqlens[0] = 0</code> and <code>cu_seqlens[S] = T</code></li>
+  <li><code>output</code>: result of shape <code>(T, num_heads, head_dim)</code>, dtype <code>float32</code></li>
+</ul>
+<p>
+  For each sequence <code>s</code> with length <code>L = cu_seqlens[s+1] - cu_seqlens[s]</code>:
+</p>
+<ol>
+  <li>
+    Gather the <code>L</code> key and value vectors from the paged cache using <code>block_table[s]</code>.
+    Token at logical position <code>t</code> (0 &le; t &lt; L) lives in physical block
+    <code>block_table[s, t / block_size]</code> at offset <code>t % block_size</code>.
+  </li>
+  <li>
+    For each query token at local position <code>p</code> (0 &le; p &lt; L), compute scaled dot-product
+    scores against gathered KV tokens at positions <code>0, 1, &hellip;, p</code> only.
+    Set scores for positions <code>&gt; p</code> to <code>-&infin;</code> before softmax.
+  </li>
+  <li>
+    Compute <code>output[cu_seqlens[s] + p]</code> as the weighted sum of value vectors using the
+    softmax attention weights.
+  </li>
+</ol>
+<p>
+  Do not use external libraries beyond the framework you select. Keep the function signature unchanged.
+  Write results directly into <code>output</code>.
+</p>
+
+<h2>Example</h2>
+<p>
+  With <code>S</code> = 2, <code>cu_seqlens</code> = <code>[0, 2, 3]</code>, <code>num_heads</code> = 1,
+  <code>head_dim</code> = 4, <code>block_size</code> = 16:
+</p>
+<p>
+\[
+Q = \begin{bmatrix} 1 & 0 & 0 & 0 \\ 0 & 1 & 0 & 0 \\ 1 & 1 & 0 & 0 \end{bmatrix}
+\]
+</p>
+<p>
+  After gathering via <code>block_table</code>, the effective <code>K</code> and <code>V</code> for each
+  sequence are:
+</p>
+<p>
+\[
+K_{\text{seq 0}} = \begin{bmatrix} 1 & 0 & 0 & 0 \\ 0 & 1 & 0 & 0 \end{bmatrix}, \quad
+V_{\text{seq 0}} = \begin{bmatrix} 1 & 2 & 3 & 4 \\ 5 & 6 & 7 & 8 \end{bmatrix}
+\]
+\[
+K_{\text{seq 1}} = \begin{bmatrix} 1 & 0 & 0 & 0 \end{bmatrix}, \quad
+V_{\text{seq 1}} = \begin{bmatrix} 9 & 10 & 11 & 12 \end{bmatrix}
+\]
+</p>
+<p>
+  Applying the causal mask and softmax within each sequence:
+</p>
+<p>
+\[
+\text{output} \approx
+\begin{bmatrix}
+  1.0000 & 2.0000 & 3.0000 & 4.0000 \\
+  3.4898 & 4.4898 & 5.4898 & 6.4898 \\
+  9.0000 & 10.0000 & 11.0000 & 12.0000
+\end{bmatrix}
+\]
+</p>
+
+<h2>Constraints</h2>
+<ul>
+  <li>1 &le; <code>S</code> &le; 256</li>
+  <li>1 &le; sequence length &le; 2,048 (each individual sequence)</li>
+  <li>1 &le; <code>T</code> &le; 16,384 (total packed tokens)</li>
+  <li>1 &le; <code>num_heads</code> &le; 64</li>
+  <li>1 &le; <code>head_dim</code> &le; 256; <code>head_dim</code> is a multiple of 8</li>
+  <li>16 &le; <code>block_size</code> &le; 64; <code>block_size</code> is a power of 2</li>
+  <li><code>cu_seqlens</code> is monotonically non-decreasing with <code>cu_seqlens[0]</code> = 0 and <code>cu_seqlens[S]</code> = <code>T</code></li>
+  <li><code>Q</code>, <code>K_cache</code>, <code>V_cache</code>, <code>output</code> are <code>float32</code>;
+      <code>block_table</code> and <code>cu_seqlens</code> are <code>int32</code></li>
+  <li><code>block_table[s, i]</code> is a valid index into the first dimension of <code>K_cache</code> for all
+      <code>i &lt; ceil((cu_seqlens[s+1] - cu_seqlens[s]) / block_size)</code></li>
+  <li>Performance is measured with <code>T</code> = 8,192, <code>num_heads</code> = 32, <code>head_dim</code> = 128,
+      <code>block_size</code> = 16, <code>S</code> = 32 (sequence lengths between 128 and 384)</li>
+</ul>
