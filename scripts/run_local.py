@@ -17,7 +17,7 @@ Usage examples:
     python scripts/run_local.py --all-challenges challenges/easy \\
         --framework pytorch --test functional
 
-Supported frameworks: pytorch, triton, jax, cuda
+Supported frameworks: pytorch, triton, jax, cuda, cutlass, cute, tilelang, mojo
 
 The script will import the challenge's `challenge.py`, generate tests, load the solution
 implementation for the requested framework (Python solutions are imported directly; CUDA
@@ -143,6 +143,7 @@ def find_solution_file(challenge_dir: Path, framework: str) -> Path:
         "cute": "solution.cute.py",
         "tilelang": "solution.tilelang.py",
         "cuda": "solution.cu",
+        "cutlass": "solution.cutlass.cu",
         "mojo": "solution.mojo",
     }
     if framework not in mapping:
@@ -360,6 +361,94 @@ def compile_cuda_shared(solution_cu: Path, build_dir: Optional[Path] = None) -> 
     if res.returncode != 0:
         logger.error("nvcc failed:\n%s", res.stdout)
         raise RuntimeError("Failed to compile CUDA solution")
+    return so_path
+
+
+def _find_cutlass_include_dir() -> Path:
+    """Locate the CUTLASS include directory relative to the repo root."""
+    repo_root = Path(__file__).resolve().parents[1]
+    cutlass_include = repo_root / "3rdparty" / "cutlass" / "include"
+    if not cutlass_include.exists():
+        raise FileNotFoundError(
+            f"CUTLASS include directory not found at {cutlass_include}. "
+            "Did you forget `git submodule update --init --recursive`?"
+        )
+    return cutlass_include
+
+
+def compile_cutlass_shared(solution_cu: Path, build_dir: Optional[Path] = None) -> Path:
+    """Compile a .cu solution file with CUTLASS headers into a shared library."""
+    nvcc = shutil.which("nvcc")
+    if nvcc is None:
+        raise FileNotFoundError(
+            "nvcc not found in PATH. Install CUDA toolkit to compile .cu files."
+        )
+
+    cutlass_include = _find_cutlass_include_dir()
+    extra_flags = ["-I", str(cutlass_include), "-I", str(cutlass_include.parent)]
+
+    if build_dir is not None:
+        so_path = build_dir / "solution_lib.so"
+        cmd = [
+            nvcc,
+            "-O2",
+            "-shared",
+            "-Xcompiler",
+            "-fPIC",
+            "-o",
+            str(so_path),
+            str(solution_cu),
+            *extra_flags,
+        ]
+        logger.info("Compiling CUTLASS %s -> %s", solution_cu, so_path)
+        res = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if res.returncode != 0:
+            logger.error("nvcc failed:\n%s", res.stdout)
+            raise RuntimeError("Failed to compile CUTLASS solution")
+        return so_path
+
+    file_hash = hashlib.sha256(solution_cu.read_bytes()).hexdigest()[:16]
+    cache_dir = Path(
+        os.environ.get(
+            "RUN_LOCAL_CUTLASS_CACHE", Path(tempfile.gettempdir()) / "run_local_cutlass_cache"
+        )
+    )
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    so_path = cache_dir / f"{solution_cu.stem}_{file_hash}.so"
+
+    if so_path.exists():
+        src_mtime = solution_cu.stat().st_mtime
+        cache_mtime = so_path.stat().st_mtime
+        if cache_mtime >= src_mtime:
+            logger.info("Using cached CUTLASS shared library: %s", so_path)
+            return so_path
+
+    cmd = [
+        nvcc,
+        "-O2",
+        "-shared",
+        "-Xcompiler",
+        "-fPIC",
+        "-o",
+        str(so_path),
+        str(solution_cu),
+        *extra_flags,
+    ]
+    logger.info("Compiling CUTLASS %s -> %s", solution_cu, so_path)
+    res = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if res.returncode != 0:
+        logger.error("nvcc failed:\n%s", res.stdout)
+        raise RuntimeError("Failed to compile CUTLASS solution")
     return so_path
 
 
@@ -753,7 +842,7 @@ def run_single_challenge(
 
         # Preload python solution module once for Python frameworks
         solution_mod: Optional[types.ModuleType] = None
-        if framework != "cuda":
+        if framework not in ("cuda", "cutlass"):
             try:
                 solution_mod = load_module_from_path("solution_module", solution_path)
             except Exception:
@@ -763,7 +852,7 @@ def run_single_challenge(
         ref_times: List[float] = []
         solution_times: List[float] = []
 
-        if framework == "cuda" and (repeat > 1 or warmup > 0):
+        if framework in ("cuda", "cutlass") and (repeat > 1 or warmup > 0):
             logger.info(
                 "CUDA framework: compiling .cu solution once per test and reusing it "
                 "for repeated runs."
@@ -809,33 +898,37 @@ def run_single_challenge(
                 overall_ok_framework = False
                 continue
 
-            # Run solution: compile once for CUDA (if needed), perform warmup, then measured repeats
+            # Run solution: compile once for CUDA/CUTLASS (if needed), perform warmup, then measured repeats
             try:
-                cuda_lib = None
-                if framework == "cuda":
+                compiled_lib = None
+                if framework in ("cuda", "cutlass"):
+                    compile_fn = (
+                        compile_cutlass_shared if framework == "cutlass" else compile_cuda_shared
+                    )
+                    fw_label = "CUTLASS" if framework == "cutlass" else "CUDA"
                     # compile once per test and reuse the library for warmup/repeats
                     try:
                         key = str(solution_path.resolve())
-                        cuda_lib = None
+                        compiled_lib = None
                         if key in _cuda_lib_cache:
                             cached_lib, cached_mtime = _cuda_lib_cache[key]
                             if cached_mtime >= solution_path.stat().st_mtime:
-                                cuda_lib = cached_lib
-                        if cuda_lib is None:
-                            so = compile_cuda_shared(solution_path)
-                            cuda_lib = ctypes.CDLL(str(so))
-                            _cuda_lib_cache[key] = (cuda_lib, solution_path.stat().st_mtime)
+                                compiled_lib = cached_lib
+                        if compiled_lib is None:
+                            so = compile_fn(solution_path)
+                            compiled_lib = ctypes.CDLL(str(so))
+                            _cuda_lib_cache[key] = (compiled_lib, solution_path.stat().st_mtime)
                     except Exception as e:
-                        logger.exception("Failed to compile CUDA solution: %s", e)
+                        logger.exception("Failed to compile %s solution: %s", fw_label, e)
                         overall_ok_framework = False
                         continue
 
                 # prepare runner callable
-                if framework == "cuda":
+                if framework in ("cuda", "cutlass"):
                     # Capture current values to avoid late-binding issues
                     _sol_path = solution_path
                     _inst = inst
-                    _clib = cuda_lib
+                    _clib = compiled_lib
 
                     def _cuda_runner(
                         tmp: Dict[str, Any],
@@ -1291,10 +1384,10 @@ def main(argv: List[str] | None = None) -> int:
         "--framework",
         required=True,
         nargs="+",
-        choices=["pytorch", "triton", "jax", "cuda", "cute", "tilelang", "mojo"],
+        choices=["pytorch", "triton", "jax", "cuda", "cutlass", "cute", "tilelang", "mojo"],
         help=(
             "Framework(s) to run: provide one or more of "
-            "pytorch triton jax cuda cute tilelang mojo (space-separated)"
+            "pytorch triton jax cuda cutlass cute tilelang mojo (space-separated)"
         ),
     )
     parser.add_argument(
