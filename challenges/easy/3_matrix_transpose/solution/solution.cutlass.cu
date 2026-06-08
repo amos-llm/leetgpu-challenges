@@ -51,15 +51,16 @@ extern "C" void solve(const float* input, float* output, int rows, int cols) {
     auto layout_src = make_layout(make_shape(rows, cols), GenRowMajor{});
     auto layout_dst = make_layout(make_shape(cols, rows), GenRowMajor{});
 
-    auto block_shape = make_shape(_64{}, _64{});
+    auto block_shape = make_shape(_32{}, _32{});
     auto thr_layout = make_layout(make_shape(_8{}, _32{}), GenRowMajor{});
 
-    auto tiled_src_space = tiled_divide(layout_src, block_shape);
-    dim3 grid_dim(size<1>(tiled_src_space), size<2>(tiled_src_space));
+    auto tiled_src_layout = tiled_divide(layout_src, block_shape);
+    dim3 grid_dim(size<1>(tiled_src_layout), size<2>(tiled_src_layout));
     dim3 block_dim(size(thr_layout));
 
-    auto smem_layout_src = make_layout(block_shape, GenRowMajor{});
-    auto smem_layout_dst = make_layout(block_shape, GenColMajor{});
+    auto swizzle = Swizzle<5, 0, 5>{};
+    auto smem_layout_src = composition(swizzle, make_layout(block_shape, GenRowMajor{}));
+    auto smem_layout_dst = composition(swizzle, make_layout(block_shape, GenColMajor{}));
 
     matrix_transpose_kernel<<<grid_dim, block_dim>>>(input, output, layout_src, layout_dst,
                                                      block_shape, smem_layout_src, smem_layout_dst,
