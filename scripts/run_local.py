@@ -898,7 +898,7 @@ def run_single_challenge(
                 overall_ok_framework = False
                 continue
 
-            # Run solution: compile once for CUDA/CUTLASS (if needed), perform warmup, then measured repeats
+            # Run solution: compile once (CUDA/CUTLASS), warmup, then measured repeats
             try:
                 compiled_lib = None
                 if framework in ("cuda", "cutlass"):
