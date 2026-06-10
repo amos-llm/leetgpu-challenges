@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html data-theme="dark">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LeetGPU Challenges</title>
+  <link rel="stylesheet" href="{{ root }}/assets/css/style.css">
+</head>
+
+<body>
+
+  <header>
+    <div class="header-inner">
+      <a href="{{ root }}/" class="logo">LeetGPU <span class="logo-sub">Challenges</span></a>
+      <button id="theme-toggle" class="theme-btn" aria-label="Toggle theme">
+        <svg class="sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2">
+          <circle cx="12" cy="12" r="5" />
+          <path
+            d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+        </svg>
+        <svg class="moon-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <section class="hero">
+    <h1>GPU Programming Challenges</h1>
+    <p class="hero-sub">A collection of {{ total }} GPU challenges spanning Easy to Hard, with solutions in <strong>{{
+        all_frameworks|length }}</strong> frameworks.</p>
+  </section>
+
+  <section class="controls">
+    <div class="filter-row">
+      <div class="filter-tabs">
+        <button class="filter-tab active" data-filter="all">All <span class="count">({{ total }})</span></button>
+        <button class="filter-tab" data-filter="easy">Easy <span class="count">({{ counts.easy }})</span></button>
+        <button class="filter-tab" data-filter="medium">Medium <span class="count">({{ counts.medium }})</span></button>
+        <button class="filter-tab" data-filter="hard">Hard <span class="count">({{ counts.hard }})</span></button>
+      </div>
+      <div class="search-wrap">
+        <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2">
+          <circle cx="11" cy="11" r="8" />
+          <path d="m21 21-4.35-4.35" />
+        </svg>
+        <input type="text" id="search" placeholder="Search by name or number&hellip;" />
+      </div>
+    </div>
+    <div class="filter-row">
+      <div class="framework-tabs">
+        <button class="framework-tab active" data-framework="all">All <span class="count">({{ total }})</span></button>
+        {% for fw in all_frameworks %}
+        <button class="framework-tab" data-framework="{{ fw }}">{{ fw }} <span class="count">({{ fw_counts[fw]
+            }})</span></button>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <main class="challenge-grid" id="challenge-grid">
+    {% for c in challenges %}
+    <a href="{{ root }}/challenges/{{ c.difficulty }}/{{ c.slug }}/" class="challenge-card"
+      data-difficulty="{{ c.difficulty }}" data-name="{{ c.name|lower }}" data-number="{{ c.number }}"
+      data-frameworks="{{ c.framework_attr }}">
+      <div class="card-top">
+        <span class="card-num">#{{ c.number }}</span>
+        <span class="badge {{ c.difficulty }}">{{ c.difficulty }}</span>
+      </div>
+      <h3 class="card-title">{{ c.name }}</h3>
+      {% if c.snippet %}
+      <p class="card-snippet">{{ c.snippet }}</p>
+      {% endif %}
+      <div class="card-meta">
+        {% if c.solution_files %}
+        <span class="frameworks">{{ c.solution_files|length }} frameworks</span>
+        {% endif %}
+      </div>
+    </a>
+    {% endfor %}
+  </main>
+
+  <footer>
+    <p><a href="https://leetgpu.com">leetgpu.com</a> &middot; MIT License</p>
+  </footer>
+
+  <script src="{{ root }}/assets/js/main.js"></script>
+</body>
+
+</html>
