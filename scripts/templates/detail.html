@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html data-theme="dark">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ c.name }} - LeetGPU Challenges</title>
+  <link rel="stylesheet" href="{{ root }}/assets/css/style.css">
+  <link id="prism-dark" rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+  <link id="prism-light" rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+</head>
+
+<body>
+
+  <header>
+    <div class="header-inner">
+      <nav class="breadcrumb">
+        <a href="{{ root }}/">Home</a>
+        <span class="sep">/</span>
+        <a href="{{ root }}/?difficulty={{ c.difficulty }}">{{ c.difficulty }}</a>
+        <span class="sep">/</span>
+        <span>{{ c.slug }}</span>
+      </nav>
+      <button id="theme-toggle" class="theme-btn" aria-label="Toggle theme">
+        <svg class="sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2">
+          <circle cx="12" cy="12" r="5" />
+          <path
+            d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+        </svg>
+        <svg class="moon-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <article class="detail-layout">
+    <div class="detail-main">
+      <div class="title-bar">
+        <h1>{{ c.name }}</h1>
+        <span class="badge {{ c.difficulty }}">{{ c.difficulty }}</span>
+      </div>
+
+      <div class="detail-columns">
+        <div class="detail-desc">
+          <div class="challenge-body">
+            {{ c.html_content }}
+          </div>
+        </div>
+
+        <div class="detail-code">
+          {% if c.solution_files %}
+          <section class="code-section">
+            <div class="code-tabs" data-group="solution">
+              <nav class="tab-nav">
+                {% for f in c.solution_files %}
+                <button class="tab-btn {% if loop.first %}active{% endif %}" data-tab="solution-{{ loop.index0 }}">{{
+                  f.name
+                  }}</button>
+                {% endfor %}
+              </nav>
+              {% for f in c.solution_files %}
+              <div class="tab-panel {% if loop.first %}active{% endif %}" data-panel="solution-{{ loop.index0 }}">
+                <div class="code-block-wrapper">
+                  <button class="copy-btn" aria-label="Copy code">
+                    <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                      stroke-width="2">
+                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                    <svg class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                      stroke-width="2">
+                      <polyline points="20 6 9 17 4 12"></polyline>
+                    </svg>
+                  </button>
+                  <pre><code class="language-{{ f.language }}">{{ f.content | e }}</code></pre>
+                </div>
+              </div>
+              {% endfor %}
+            </div>
+          </section>
+          {% endif %}
+        </div>
+      </div>
+
+      <nav class="pager">
+        {% if prev %}
+        <a href="{{ root }}/challenges/{{ prev.difficulty }}/{{ prev.slug }}/" class="pager-link prev">
+          <span class="pager-dir">&larr; Previous</span>
+          <span class="pager-title">{{ prev.name }}</span>
+        </a>
+        {% else %}
+        <span></span>
+        {% endif %}
+        {% if next %}
+        <a href="{{ root }}/challenges/{{ next.difficulty }}/{{ next.slug }}/" class="pager-link next">
+          <span class="pager-dir">Next &rarr;</span>
+          <span class="pager-title">{{ next.name }}</span>
+        </a>
+        {% else %}
+        <span></span>
+        {% endif %}
+      </nav>
+    </div>
+
+  </article>
+
+  <footer>
+    <p><a href="https://leetgpu.com">leetgpu.com</a> &middot; MIT License</p>
+  </footer>
+
+  <script src="{{ root }}/assets/js/main.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+  <script>
+    Prism.plugins.autoloader.languages_path = "https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/";
+  </script>
+</body>
+
+</html>
