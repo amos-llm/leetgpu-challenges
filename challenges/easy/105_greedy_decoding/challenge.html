@@ -1,0 +1,38 @@
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+<p>
+  Implement greedy decoding (argmax) for language model inference.
+  Given a 2D array of logits with shape \(B \times V\), where \(B\) is the batch size and \(V\) is the vocabulary size,
+  select the token index with the highest logit value for each sequence in the batch.
+  This is the simplest decoding strategy used in autoregressive language models.
+</p>
+
+<h2>Implementation Requirements</h2>
+<ul>
+  <li>External libraries are not permitted</li>
+  <li>The <code>solve</code> function signature must remain unchanged</li>
+  <li><code>logits</code> is a 2D array of 32-bit floats with shape <code>(batch_size, vocab_size)</code></li>
+  <li><code>tokens</code> is a 1D output array of 32-bit integers with shape <code>(batch_size,)</code></li>
+  <li>For each row in <code>logits</code>, find the index of the maximum value and write it to <code>tokens[i]</code></li>
+  <li>If multiple positions have the same maximum value, select the smallest index (first max)</li>
+</ul>
+
+<h2>Example 1:</h2>
+<p>
+  \[
+  \text{logits} = \begin{bmatrix}
+  0.1 & 0.5 & 0.2 & 0.9 & 0.3 & 0.7 & 0.4 & 0.6 \\
+  0.8 & 0.3 & 0.1 & 0.2 & 0.9 & 0.4 & 0.5 & 0.7
+  \end{bmatrix}
+  \]
+  \[
+  \text{tokens} = \begin{bmatrix} 3 & 4 \end{bmatrix}
+  \]
+</p>
+
+<h2>Constraints</h2>
+<ul>
+  <li>1 &le; <code>batch_size</code> &le; 4,096</li>
+  <li>1 &le; <code>vocab_size</code> &le; 256,000</li>
+  <li>Performance is measured with <code>batch_size</code> = 1,024, <code>vocab_size</code> = 128,000</li>
+</ul>
