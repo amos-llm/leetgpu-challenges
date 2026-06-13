@@ -1,0 +1,82 @@
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+<p>
+  Implement 2D block-wise FP8 E4M3 quantization of a float32 weight matrix.
+  This is the 2D scaling scheme used in NVIDIA Transformer Engine and DeepGEMM
+  for FP8 mixed-precision training, where the weight matrix is divided into
+  BLOCK_SIZE &times; BLOCK_SIZE tiles and each tile gets its own scale
+  (<code>scale_granularity_mnk = (128, 128, K)</code> in DeepGEMM).
+</p>
+
+<p>
+  Given a float32 matrix \(x\) of shape \(M \times N\), divide it into tiles of
+  BLOCK_SIZE&times;BLOCK_SIZE. For each tile, compute the maximum absolute value,
+  derive a tile scale, and encode each element to FP8 E4M3.
+</p>
+
+<h2>FP8 E4M3 Format</h2>
+<ul>
+  <li>Bit layout: \([S|E_3|E_2|E_1|E_0|M_2|M_1|M_0]\), bias = 7, max normal = 448</li>
+  <li>Normal: \((-1)^S \times 2^{E-7} \times 1.M\)</li>
+  <li>Subnormal (exp=0000): \((-1)^S \times 2^{-6} \times 0.M\)</li>
+  <li>NaN: encode as 0x7F. Overflow: clamp to &pm;448</li>
+</ul>
+
+<h2>Algorithm</h2>
+<pre>
+For each tile (bi, bj):
+  max_abs = max(|x[i,j]|) for i, j in tile
+  scale = max_abs / 448.0
+  If max_abs == 0: scale = 1.0
+  For each element (i, j) in tile:
+    y[i,j] = fp8_e4m3(x[i,j] / scale)
+  scales[bi, bj] = scale
+</pre>
+
+<h2>Implementation Requirements</h2>
+<ul>
+  <li>External libraries are not permitted</li>
+  <li>The <code>solve</code> function signature must remain unchanged</li>
+  <li>FP8 encodings in <code>y</code> (uint8); tile scales in <code>scales</code> (float32)</li>
+  <li>All computation must occur on the GPU</li>
+  <li>Edge tiles may be smaller than BLOCK_SIZE &times; BLOCK_SIZE</li>
+</ul>
+
+<h2>Example</h2>
+<p>
+Input: Matrix \(x\) (\(M=4, N=4\)), BLOCK_SIZE=2:
+\[
+\begin{bmatrix}
+240.0 & 120.0 & 1.0 & 2.0 \\
+-240.0 & 0.0 & 3.0 & 4.0 \\
+0.0 & 60.0 & 5.0 & 6.0 \\
+30.0 & -30.0 & 7.0 & 8.0
+\end{bmatrix}
+\]
+</p>
+<p>
+Tile (0,0): max_abs=240.0, scale=0.5357...<br>
+Tile (0,1): max_abs=4.0, scale=0.008928...<br>
+Tile (1,0): max_abs=60.0, scale=0.1339...<br>
+Tile (1,1): max_abs=8.0, scale=0.017857...
+</p>
+<p>
+Output: Tile scales:
+\[
+\begin{bmatrix}
+0.5357... & 0.008928... \\
+0.1339... & 0.017857...
+\end{bmatrix}
+\]
+<br>
+\(y\) with FP8 encodings for each tile
+</p>
+
+<h2>Constraints</h2>
+<ul>
+  <li>1 &le; <code>M</code>, <code>N</code> &le; 8,192</li>
+  <li>BLOCK_SIZE in {16, 32, 64, 128}</li>
+  <li>Input <code>x</code> is float32; output <code>y</code> is uint8; <code>scales</code> is float32</li>
+  <li>All tensors stored in row-major order</li>
+  <li>Performance is measured with <code>M</code> = 4,096, <code>N</code> = 4,096, <code>BLOCK_SIZE</code> = 128</li>
+</ul>
