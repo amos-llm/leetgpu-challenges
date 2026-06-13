@@ -1,0 +1,185 @@
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+<p>
+  Implement a fused GPU kernel that applies Rotary Positional Embedding (RoPE) to query and key
+  tensors, then immediately uses the rotated results to compute scaled dot-product attention.
+  Inputs are float32 tensors: <code>Q</code>, <code>K</code>, and <code>V</code> all have shape
+  <code>(M, D)</code> (self-attention), while <code>cos</code> and <code>sin</code> are the RoPE
+  frequency components shared by <code>Q</code> and <code>K</code>.
+  Fusing RoPE into the attention kernel saves two full read&ndash;write passes over the
+  <code>(M, D)</code> intermediate tensors, reducing global memory bandwidth by roughly a third.
+</p>
+
+<svg width="800" height="290" style="display:block; margin:20px auto;">
+  <defs>
+    <marker id="ah" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0,8 3,0 6" fill="#999"/>
+    </marker>
+  </defs>
+  <rect width="800" height="290" fill="#222" rx="8"/>
+
+  <!-- Q box -->
+  <rect x="20" y="30" width="70" height="36" fill="#1a3a5c" rx="4"/>
+  <text x="55" y="53" fill="#7ec8e3" font-family="monospace" font-size="14" text-anchor="middle">Q</text>
+
+  <!-- K box -->
+  <rect x="20" y="110" width="70" height="36" fill="#1a3a5c" rx="4"/>
+  <text x="55" y="133" fill="#7ec8e3" font-family="monospace" font-size="14" text-anchor="middle">K</text>
+
+  <!-- V box -->
+  <rect x="20" y="220" width="70" height="36" fill="#1a3a5c" rx="4"/>
+  <text x="55" y="243" fill="#7ec8e3" font-family="monospace" font-size="14" text-anchor="middle">V</text>
+
+  <!-- cos box -->
+  <rect x="110" y="22" width="56" height="24" fill="#1a3a5c" rx="4"/>
+  <text x="138" y="39" fill="#7ec8e3" font-family="monospace" font-size="11" text-anchor="middle">cos</text>
+
+  <!-- sin box -->
+  <rect x="110" y="50" width="56" height="24" fill="#1a3a5c" rx="4"/>
+  <text x="138" y="67" fill="#7ec8e3" font-family="monospace" font-size="11" text-anchor="middle">sin</text>
+
+  <!-- cos arrow to RoPE Q -->
+  <line x1="166" y1="34" x2="208" y2="48" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+  <!-- sin arrow to RoPE Q -->
+  <line x1="166" y1="62" x2="208" y2="64" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- Q arrow to RoPE Q -->
+  <line x1="90" y1="48" x2="208" y2="56" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- RoPE Q box -->
+  <rect x="210" y="38" width="90" height="36" fill="#2d3a5c" rx="4"/>
+  <text x="255" y="61" fill="#7ec8e3" font-family="monospace" font-size="13" text-anchor="middle">RoPE</text>
+
+  <!-- cos/sin for K -->
+  <rect x="110" y="102" width="56" height="24" fill="#1a3a5c" rx="4"/>
+  <text x="138" y="119" fill="#7ec8e3" font-family="monospace" font-size="11" text-anchor="middle">cos</text>
+  <rect x="110" y="130" width="56" height="24" fill="#1a3a5c" rx="4"/>
+  <text x="138" y="147" fill="#7ec8e3" font-family="monospace" font-size="11" text-anchor="middle">sin</text>
+
+  <!-- arrows to RoPE K -->
+  <line x1="166" y1="114" x2="208" y2="128" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+  <line x1="166" y1="142" x2="208" y2="144" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+  <line x1="90" y1="128" x2="208" y2="136" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- RoPE K box -->
+  <rect x="210" y="118" width="90" height="36" fill="#2d3a5c" rx="4"/>
+  <text x="255" y="141" fill="#7ec8e3" font-family="monospace" font-size="13" text-anchor="middle">RoPE</text>
+
+  <!-- rope_q dashed box (register) -->
+  <rect x="320" y="38" width="80" height="36" fill="none" stroke="#5a9c52" stroke-dasharray="4,3" rx="4"/>
+  <text x="360" y="61" fill="#5a9c52" font-family="monospace" font-size="11" text-anchor="middle">rope_q</text>
+
+  <!-- rope_k dashed box -->
+  <rect x="320" y="118" width="80" height="36" fill="none" stroke="#5a9c52" stroke-dasharray="4,3" rx="4"/>
+  <text x="360" y="141" fill="#5a9c52" font-family="monospace" font-size="11" text-anchor="middle">rope_k</text>
+
+  <!-- arrows from RoPE to dashed -->
+  <line x1="300" y1="56" x2="318" y2="56" stroke="#5a9c52" stroke-width="1.5"/>
+  <line x1="300" y1="136" x2="318" y2="136" stroke="#5a9c52" stroke-width="1.5"/>
+
+  <!-- dashed to QK^T -->
+  <line x1="400" y1="56" x2="448" y2="90" stroke="#5a9c52" stroke-width="1.5" marker-end="url(#ah)"/>
+  <line x1="400" y1="136" x2="448" y2="110" stroke="#5a9c52" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- QK^T / sqrt(D) box -->
+  <rect x="450" y="82" width="110" height="36" fill="#2d5a27" rx="4"/>
+  <text x="505" y="105" fill="#ccc" font-family="monospace" font-size="11" text-anchor="middle">QK^T / &radic;D</text>
+
+  <!-- arrow to softmax -->
+  <line x1="560" y1="100" x2="608" y2="100" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- softmax box -->
+  <rect x="610" y="82" width="80" height="36" fill="#2d3a5c" rx="4"/>
+  <text x="650" y="105" fill="#7ec8e3" font-family="monospace" font-size="13" text-anchor="middle">softmax</text>
+
+  <!-- arrow from softmax down to matmul -->
+  <line x1="650" y1="118" x2="650" y2="163" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- V arrow to matmul -->
+  <line x1="90" y1="238" x2="610" y2="220" stroke="#999" stroke-width="1.5"/>
+  <line x1="610" y1="220" x2="610" y2="183" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- MatMul (×V) box -->
+  <rect x="570" y="165" width="70" height="36" fill="#2d5a27" rx="4"/>
+  <text x="605" y="188" fill="#ccc" font-family="monospace" font-size="15" text-anchor="middle">&times;V</text>
+
+  <!-- arrow to output -->
+  <line x1="640" y1="183" x2="708" y2="183" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- output box -->
+  <rect x="710" y="165" width="70" height="36" fill="#1a5c2d" rx="4"/>
+  <text x="745" y="188" fill="#7ec8e3" font-family="monospace" font-size="13" text-anchor="middle">out</text>
+
+  <!-- labels -->
+  <text x="255" y="30" fill="#aaa" font-family="monospace" font-size="10" text-anchor="middle">(M,D)</text>
+  <text x="255" y="170" fill="#aaa" font-family="monospace" font-size="10" text-anchor="middle">(M,D)</text>
+  <text x="360" y="95" fill="#5a9c52" font-family="monospace" font-size="9" text-anchor="middle">register only</text>
+  <text x="745" y="215" fill="#aaa" font-family="monospace" font-size="10" text-anchor="middle">(M,D)</text>
+</svg>
+
+<p>
+  For each pair of tokens <code>i, j</code>, the kernel computes:
+</p>
+<p>
+  \[
+  \text{RoPE}(x, c, s)_i = x_i \odot c_i + \text{rotate\_half}(x_i) \odot s_i
+  \]
+  \[
+  \text{rotate\_half}([x_1, \dots, x_{d/2}, x_{d/2+1}, \dots, x_d]) =
+  [-x_{d/2+1}, \dots, -x_d, x_1, \dots, x_{d/2}]
+  \]
+  \[
+  \text{attn}_{i,j} = \frac{\exp(\text{RoPE}(Q, \text{cos}, \text{sin})_i \cdot
+  \text{RoPE}(K, \text{cos}, \text{sin})_j^T \,/\, \sqrt{D})}
+  {\sum_{k=0}^{M-1} \exp(\text{RoPE}(Q, \text{cos}, \text{sin})_i \cdot
+  \text{RoPE}(K, \text{cos}, \text{sin})_k^T \,/\, \sqrt{D})}
+  \]
+  \[
+  \text{out}_i = \sum_{j=0}^{M-1} \text{attn}_{i,j} \cdot V_j
+  \]
+</p>
+<p>
+  The dotted <code>rope_q</code> and <code>rope_k</code> boxes above represent
+  intermediate values that should live only in registers or shared memory
+  &mdash; never written to global memory.
+</p>
+
+<h2>Implementation Requirements</h2>
+<ul>
+  <li>Do not change the function signature.</li>
+  <li>Do not use external libraries beyond what is available in the starter.</li>
+  <li><code>D</code> is guaranteed to be an even number.</li>
+  <li>All computation must occur on the GPU.</li>
+  <li>The kernel must fuse the RoPE rotation of <code>Q</code> and <code>K</code>
+      with the attention computation, without writing intermediate rotated tensors to global memory.</li>
+</ul>
+
+<h2>Example</h2>
+<p>
+  M = 2, D = 2. With identity rotation (cos = 1, sin = 0) the output matches standard attention:
+</p>
+<p>
+  \[
+  Q = \begin{bmatrix} 1.0 & 0.0 \\ 0.0 & 1.0 \end{bmatrix} \quad
+  K = \begin{bmatrix} 1.0 & 0.0 \\ 0.0 & 1.0 \end{bmatrix} \quad
+  V = \begin{bmatrix} 1.0 & 2.0 \\ 3.0 & 4.0 \end{bmatrix}
+  \]
+  \[
+  \text{cos} = \begin{bmatrix} 1.0 & 1.0 \\ 1.0 & 1.0 \end{bmatrix} \quad
+  \text{sin} = \begin{bmatrix} 0.0 & 0.0 \\ 0.0 & 0.0 \end{bmatrix}
+  \]
+  \[
+  \text{out} \approx \begin{bmatrix}
+  1.6604 & 2.6604 \\
+  2.3396 & 3.3396
+  \end{bmatrix}
+  \]
+</p>
+
+<h2>Constraints</h2>
+<ul>
+  <li>1 &le; <code>M</code> &le; 65,536</li>
+  <li>2 &le; <code>D</code> &le; 1,024 (even number)</li>
+  <li><code>Q</code>, <code>K</code>, <code>V</code>, <code>cos</code>, <code>sin</code>, and <code>output</code> are float32</li>
+  <li>Performance is measured with <code>M</code> = 1,024, <code>D</code> = 128</li>
+</ul>
