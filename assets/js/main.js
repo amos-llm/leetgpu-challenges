@@ -36,115 +36,125 @@
      Filter tabs (index page)
      ============================================================ */
   const filterTabs = document.querySelectorAll(".filter-tab");
+  const frameworkTabs = document.querySelectorAll(".framework-tab");
   const grid = document.getElementById("challenge-grid");
   const searchInput = document.getElementById("search");
+  const emptyState = document.getElementById("empty-state");
 
   if (filterTabs.length && grid) {
+    function readHash() {
+      var h = window.location.hash.replace(/^#/, "");
+      var m = {};
+      if (h) {
+        h.split("&").forEach(function (part) {
+          var kv = part.split("=");
+          if (kv.length === 2) m[kv[0]] = decodeURIComponent(kv[1]);
+        });
+      }
+      return m;
+    }
+
+    function writeHash(difficulty, framework, query) {
+      var parts = [];
+      if (difficulty && difficulty !== "all") parts.push("difficulty=" + difficulty);
+      if (framework && framework !== "all") parts.push("framework=" + framework);
+      if (query) parts.push("q=" + encodeURIComponent(query));
+      var h = parts.length ? "#" + parts.join("&") : "";
+      if (window.location.hash !== h) {
+        history.replaceState(null, "", h || window.location.pathname);
+      }
+    }
+
     function applyFilter() {
-      const activeFilter = document.querySelector(".filter-tab.active");
-      const difficulty = activeFilter ? activeFilter.dataset.filter : "all";
-      const query = searchInput ? searchInput.value.toLowerCase().trim() : "";
+      var activeFilter = document.querySelector(".filter-tab.active");
+      var difficulty = activeFilter ? activeFilter.dataset.filter : "all";
+      var activeFramework = document.querySelector(".framework-tab.active");
+      var framework = activeFramework ? activeFramework.dataset.framework : "all";
+      var query = searchInput ? searchInput.value.toLowerCase().trim() : "";
 
-      const cards = grid.querySelectorAll(".challenge-card");
+      var cards = grid.querySelectorAll(".challenge-card");
+      var visible = 0;
       cards.forEach(function (card) {
-        const cardDifficulty = card.dataset.difficulty;
-        const name = card.dataset.name || "";
-        const number = card.dataset.number || "";
+        var cardDifficulty = card.dataset.difficulty;
+        var name = card.dataset.name || "";
+        var number = card.dataset.number || "";
+        var cardFrameworks = (card.dataset.frameworks || "").split(",");
 
-        const matchesFilter =
-          difficulty === "all" || cardDifficulty === difficulty;
-        const matchesSearch =
+        var okDifficulty = difficulty === "all" || cardDifficulty === difficulty;
+        var okFramework = framework === "all" || cardFrameworks.indexOf(framework) !== -1;
+        var okSearch =
           !query ||
-          name.includes(query) ||
+          name.indexOf(query) !== -1 ||
           number === query ||
           number.toString() === query;
 
-        card.classList.toggle("hidden", !(matchesFilter && matchesSearch));
+        var ok = okDifficulty && okFramework && okSearch;
+        card.classList.toggle("hidden", !ok);
+        if (ok) visible++;
       });
+
+      if (emptyState) {
+        emptyState.hidden = visible > 0;
+      }
+
+      writeHash(difficulty, framework, query);
+    }
+
+    function activateTab(tabs, attr, value) {
+      tabs.forEach(function (t) { t.classList.remove("active"); });
+      var target = document.querySelector('[' + attr + '="' + value + '"]');
+      if (target) target.classList.add("active");
+      else if (tabs.length) tabs[0].classList.add("active");
     }
 
     filterTabs.forEach(function (tab) {
       tab.addEventListener("click", function () {
-        filterTabs.forEach(function (t) {
-          t.classList.remove("active");
-        });
-        tab.classList.add("active");
+        activateTab(filterTabs, 'data-filter', tab.dataset.filter);
         applyFilter();
       });
     });
 
-    // Check URL for ?difficulty= param (from breadcrumb links)
-    const params = new URLSearchParams(window.location.search);
-    const diffParam = params.get("difficulty");
-    if (diffParam) {
-      const targetTab = document.querySelector(
-        '.filter-tab[data-filter="' + diffParam + '"]'
-      );
-      if (targetTab) {
-        filterTabs.forEach(function (t) {
-          t.classList.remove("active");
-        });
-        targetTab.classList.add("active");
-      }
-    }
-
-    if (searchInput) {
-      searchInput.addEventListener("input", applyFilter);
-    }
-
-    /* ============================================================
-       Framework filter tabs (index page)
-       ============================================================ */
-    const frameworkTabs = document.querySelectorAll(".framework-tab");
-
     if (frameworkTabs.length) {
-      // Extend applyFilter to include framework filtering
-      applyFilter = function () {
-        const activeFilter = document.querySelector(".filter-tab.active");
-        const difficulty = activeFilter ? activeFilter.dataset.filter : "all";
-        const activeFramework = document.querySelector(".framework-tab.active");
-        const framework = activeFramework
-          ? activeFramework.dataset.framework
-          : "all";
-        const query = searchInput
-          ? searchInput.value.toLowerCase().trim()
-          : "";
-
-        const cards = grid.querySelectorAll(".challenge-card");
-        cards.forEach(function (card) {
-          const cardDifficulty = card.dataset.difficulty;
-          const name = card.dataset.name || "";
-          const number = card.dataset.number || "";
-          const cardFrameworks = (card.dataset.frameworks || "").split(",");
-
-          const matchesDifficulty =
-            difficulty === "all" || cardDifficulty === difficulty;
-          const matchesFramework =
-            framework === "all" ||
-            cardFrameworks.indexOf(framework) !== -1;
-          const matchesSearch =
-            !query ||
-            name.indexOf(query) !== -1 ||
-            number === query ||
-            number.toString() === query;
-
-          card.classList.toggle(
-            "hidden",
-            !(matchesDifficulty && matchesFramework && matchesSearch)
-          );
-        });
-      };
-
       frameworkTabs.forEach(function (tab) {
         tab.addEventListener("click", function () {
-          frameworkTabs.forEach(function (t) {
-            t.classList.remove("active");
-          });
-          tab.classList.add("active");
+          activateTab(frameworkTabs, 'data-framework', tab.dataset.framework);
           applyFilter();
         });
       });
     }
+
+    // Restore state from URL hash on load
+    var hashState = readHash();
+    if (hashState.difficulty) {
+      activateTab(filterTabs, 'data-filter', hashState.difficulty);
+    }
+    if (hashState.framework) {
+      activateTab(frameworkTabs, 'data-framework', hashState.framework);
+    }
+    if (hashState.q && searchInput) {
+      searchInput.value = hashState.q;
+    }
+
+    applyFilter();
+
+    if (searchInput) {
+      var searchTimer;
+      searchInput.addEventListener("input", function () {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(applyFilter, 150);
+      });
+    }
+
+    // Handle back/forward
+    window.addEventListener("popstate", function () {
+      var s = readHash();
+      if (s.difficulty) activateTab(filterTabs, 'data-filter', s.difficulty);
+      else activateTab(filterTabs, 'data-filter', 'all');
+      if (s.framework) activateTab(frameworkTabs, 'data-framework', s.framework);
+      else if (frameworkTabs.length) activateTab(frameworkTabs, 'data-framework', 'all');
+      if (searchInput) searchInput.value = s.q || "";
+      applyFilter();
+    });
   }
 
   /* ============================================================
