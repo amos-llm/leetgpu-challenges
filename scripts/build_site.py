@@ -58,7 +58,40 @@ def read_challenge_html(path: Path) -> str:
         "",
         content,
     )
+    # Strip hardcoded width/height from SVG tags so CSS controls sizing
+    content = _strip_svg_dimensions(content)
     return content.strip()
+
+
+def _strip_svg_dimensions(html: str) -> str:
+    """Remove hardcoded width/height from <svg> tags.
+
+    When an SVG has a viewBox the attributes are simply dropped — the
+    viewBox supplies the aspect ratio and CSS controls the rendered size.
+    When viewBox is missing it is synthesised from width/height so the
+    coordinate system is preserved.
+    """
+
+    def _attr_val(tag: str, name: str) -> str | None:
+        m = re.search(rf'{name}\s*=\s*"([^"]*)"', tag)
+        if m:
+            return m.group(1)
+        m = re.search(rf"{name}\s*=\s*'([^']*)'", tag)
+        return m.group(1) if m else None
+
+    def _remove(m: re.Match) -> str:
+        tag = m.group(0)
+        has_viewbox = "viewBox" in tag
+        w = _attr_val(tag, "width")
+        h = _attr_val(tag, "height")
+        for attr in ("width", "height"):
+            tag = re.sub(rf'\s+{attr}\s*=\s*"[^"]*"', "", tag)
+            tag = re.sub(rf"\s+{attr}\s*=\s*'[^']*'", "", tag)
+        if not has_viewbox and w is not None and h is not None:
+            tag = tag.replace("<svg", f'<svg viewBox="0 0 {w} {h}"', 1)
+        return tag
+
+    return re.sub(r"<svg\b[^>]*>", _remove, html, flags=re.DOTALL)
 
 
 def get_framework_files(directory: Path) -> list[dict]:
