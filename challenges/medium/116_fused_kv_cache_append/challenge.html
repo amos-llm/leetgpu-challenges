@@ -1,0 +1,135 @@
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+<p>
+  Implement a fused GPU kernel that appends a new key&ndash;value pair to the KV-cache and
+  immediately computes decode-phase scaled dot-product attention using the updated cache.
+  In autoregressive LLM inference, this is the critical path executed once per generated token.
+  A naive implementation writes <code>K_new</code> and <code>V_new</code> to global memory,
+  then reads the entire cache back for attention. Fusing the append with attention keeps the
+  newly written data in registers and eliminates the round-trip through global memory.
+</p>
+
+<svg width="720" height="320" style="display:block; margin:20px auto;">
+  <defs>
+    <marker id="ah" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0,8 3,0 6" fill="#999"/>
+    </marker>
+  </defs>
+  <rect width="720" height="320" fill="#222" rx="8"/>
+
+  <!-- Q box -->
+  <rect x="20" y="30" width="90" height="36" fill="#1a3a5c" rx="4"/>
+  <text x="65" y="53" fill="#7ec8e3" font-family="monospace" font-size="14" text-anchor="middle">Q (H,D)</text>
+
+  <!-- K_new / V_new boxes -->
+  <rect x="20" y="110" width="90" height="36" fill="#1a3a5c" rx="4"/>
+  <text x="65" y="133" fill="#7ec8e3" font-family="monospace" font-size="13" text-anchor="middle">K_new (H,D)</text>
+  <rect x="20" y="160" width="90" height="36" fill="#1a3a5c" rx="4"/>
+  <text x="65" y="183" fill="#7ec8e3" font-family="monospace" font-size="13" text-anchor="middle">V_new (H,D)</text>
+
+  <!-- arrows from Q to attention -->
+  <line x1="110" y1="48" x2="258" y2="48" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- dashed K_new/V_new boxes (register) -->
+  <rect x="140" y="110" width="100" height="36" fill="none" stroke="#5a9c52" stroke-dasharray="4,3" rx="4"/>
+  <text x="190" y="133" fill="#5a9c52" font-family="monospace" font-size="11" text-anchor="middle">K_new (reg)</text>
+  <rect x="140" y="160" width="100" height="36" fill="none" stroke="#5a9c52" stroke-dasharray="4,3" rx="4"/>
+  <text x="190" y="183" fill="#5a9c52" font-family="monospace" font-size="11" text-anchor="middle">V_new (reg)</text>
+
+  <line x1="110" y1="128" x2="138" y2="128" stroke="#5a9c52" stroke-width="1.5"/>
+  <line x1="110" y1="178" x2="138" y2="178" stroke="#5a9c52" stroke-width="1.5"/>
+
+  <!-- K_cache / V_cache boxes -->
+  <rect x="20" y="230" width="90" height="36" fill="#1a3a5c" rx="4"/>
+  <text x="65" y="253" fill="#7ec8e3" font-family="monospace" font-size="12" text-anchor="middle">K_cache (B,H,D)</text>
+  <rect x="20" y="275" width="90" height="36" fill="#1a3a5c" rx="4"/>
+  <text x="65" y="298" fill="#7ec8e3" font-family="monospace" font-size="12" text-anchor="middle">V_cache (B,H,D)</text>
+
+  <!-- Write arrows to cache -->
+  <line x1="190" y1="128" x2="190" y2="248" stroke="#5a9c52" stroke-width="1.5" marker-end="url(#ah)"/>
+  <line x1="190" y1="178" x2="190" y2="293" stroke="#5a9c52" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- Read arrows from cache to attention -->
+  <line x1="110" y1="248" x2="258" y2="100" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+  <line x1="110" y1="293" x2="258" y2="120" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- Attention box -->
+  <rect x="260" y="58" width="200" height="60" fill="#2d5a27" rx="4"/>
+  <text x="360" y="78" fill="#ccc" font-family="monospace" font-size="11" text-anchor="middle">Scaled Dot-Product</text>
+  <text x="360" y="95" fill="#ccc" font-family="monospace" font-size="11" text-anchor="middle">Attention</text>
+  <text x="360" y="130" fill="#5a9c52" font-family="monospace" font-size="9" text-anchor="middle">uses K_new, V_new from regs</text>
+
+  <!-- arrow to output -->
+  <line x1="460" y1="88" x2="548" y2="88" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- Output box -->
+  <rect x="550" y="70" width="100" height="36" fill="#1a5c2d" rx="4"/>
+  <text x="600" y="93" fill="#7ec8e3" font-family="monospace" font-size="13" text-anchor="middle">output (H,D)</text>
+
+  <!-- seq_len indicator -->
+  <rect x="140" y="245" width="70" height="24" fill="#2d3a5c" rx="4"/>
+  <text x="175" y="262" fill="#7ec8e3" font-family="monospace" font-size="10" text-anchor="middle">pos = seq_len</text>
+</svg>
+
+<p>
+  The kernel must:
+</p>
+<p>
+  \[
+  \text{Write: } K_{\text{cache}}[\text{seq\_len}] \leftarrow K_{\text{new}}, \quad
+  V_{\text{cache}}[\text{seq\_len}] \leftarrow V_{\text{new}}
+  \]
+  \[
+  \text{Attend: } \text{out}[h] = \sum_{i=0}^{\text{seq\_len}}
+  \text{softmax}\!\left(\frac{Q[h] \cdot K_{\text{cache}}[0:\text{seq\_len}+1, h]^T}{\sqrt{D}}\right)_{\!i}
+  \cdot V_{\text{cache}}[i, h]
+  \]
+</p>
+<p>
+  The key optimization: when computing the attention score for position <code>seq_len</code>,
+  use the register-resident <code>K_new</code> and <code>V_new</code> directly instead of reading
+  them back from the cache. The cache must still be updated for future decode steps.
+</p>
+
+<h2>Implementation Requirements</h2>
+<ul>
+  <li>Do not change the function signature.</li>
+  <li>Do not use external libraries beyond what is available in the starter.</li>
+  <li><code>K_cache</code> and <code>V_cache</code> must be updated at position <code>seq_len</code>.</li>
+  <li>The kernel must fuse the cache append with the attention computation in a single kernel launch.</li>
+  <li>Attention is computed over positions <code>0</code> to <code>seq_len</code> (inclusive) after the append.</li>
+</ul>
+
+<h2>Example</h2>
+<p>
+  H = 1, D = 2, seq_len = 1 (one existing token, append a second):
+</p>
+<p>
+  \[
+  Q = \begin{bmatrix} 1.0 & 0.0 \end{bmatrix} \quad
+  K_{\text{new}} = \begin{bmatrix} 1.0 & 0.0 \end{bmatrix} \quad
+  V_{\text{new}} = \begin{bmatrix} 3.0 & 4.0 \end{bmatrix}
+  \]
+  \[
+  K_{\text{cache}}[0] = \begin{bmatrix} 1.0 & 1.0 \end{bmatrix} \quad
+  V_{\text{cache}}[0] = \begin{bmatrix} 2.0 & 3.0 \end{bmatrix}
+  \]
+</p>
+<p>
+  After appending <code>K_new</code> at <code>seq_len=1</code>, the attention over
+  <code>K_cache[:2]</code> and <code>V_cache[:2]</code> produces:
+</p>
+<p>
+  \[
+  \text{out} \approx \begin{bmatrix} 2.5000 & 3.5000 \end{bmatrix}
+  \]
+</p>
+
+<h2>Constraints</h2>
+<ul>
+  <li>1 &le; <code>H</code> &le; 64 (number of attention heads)</li>
+  <li>2 &le; <code>D</code> &le; 256 (head dimension)</li>
+  <li>0 &le; <code>seq_len</code> &lt; cache capacity (i.e. <code>K_cache.shape[0]</code>)</li>
+  <li><code>Q</code>, <code>K_new</code>, <code>V_new</code>, <code>K_cache</code>, <code>V_cache</code>, and <code>output</code> are float32</li>
+  <li>Performance is measured with <code>H</code> = 32, <code>D</code> = 128, <code>seq_len</code> = 2,047</li>
+</ul>
