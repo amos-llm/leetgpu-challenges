@@ -1,0 +1,93 @@
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+<p>
+  Implement MXFP4 (Microscaling FP4) activation quantization — the online step that
+  runs at every inference forward pass, converting float32 activations into packed
+  FP4 + E8M0 scales before feeding into hardware-accelerated MXFP4 matrix
+  multiplication on AMD MI300X and NVIDIA Blackwell GPUs. MXFP4 is the OCP
+  microscaling standard: a float32 activation matrix <code>x[M, K]</code> is
+  quantized <b>per-token</b> (per-row), where <code>M</code> is the token count and
+  <code>K</code> is the feature (contraction) dimension of the GEMM. Each row is
+  divided into contiguous 1D blocks of 32 elements along <code>K</code>, each block
+  shares one FP8 E8M0 scale factor (power-of-2 only), and each element is encoded
+  to FP4 E2M1 (4-bit floating point). Per-token granularity is essential because
+  outlier tokens (e.g. delimiter tokens, early tokens in attention) can have
+  activations 10–100&times; larger than typical tokens; a single per-tensor scale
+  would either clip these outliers or quantize most values to zero. Blackwell and
+  MI300X tensor cores natively consume packed FP4 data with E8M0 scales, performing
+  fused dequantization and matrix multiply-accumulate in a single hardware
+  instruction — a 4&times; memory bandwidth reduction over BF16/FP16 at the cost
+  of this quantization pass.
+</p>
+
+<h2>Formats</h2>
+<ul>
+  <li><b>FP4 E2M1</b>: 1 sign, 2 exponent (bias=1), 1 mantissa. 16 values:
+    \(\{0, \pm 0.5, \pm 1, \pm 1.5, \pm 2, \pm 3, \pm 4, \pm 6\}\)</li>
+  <li><b>FP8 E8M0 scale</b>: 8-bit unsigned exponent. Value = \(2^{e-127}\).
+    Range from \(2^{-126}\) to \(2^{127}\). One scale per block of 32, adding
+    only 0.25 bits/element overhead.</li>
+  <li><b>Packing</b>: two 4-bit FP4 values packed per uint8 along the K dimension.
+    High nibble = even index, low nibble = odd index. Consecutive elements along K
+    are contiguous in memory, enabling coalesced GPU access.</li>
+</ul>
+
+<h2>FP4 E2M1 Encoding Table</h2>
+<pre>
+0x0= 0.0   0x1= 0.5   0x2= 1.0   0x3= 1.5
+0x4= 2.0   0x5= 3.0   0x6= 4.0   0x7= 6.0
+0x8=-0.0   0x9=-0.5   0xA=-1.0   0xB=-1.5
+0xC=-2.0   0xD=-3.0   0xE=-4.0   0xF=-6.0
+</pre>
+
+<h2>Algorithm</h2>
+<pre>
+For each token m in [0, M):
+  For each block b in [0, K/32):
+    max_abs = max(|x[m, b*32 + i]|) for i in [0, 32)
+    scale = smallest_power_of_2_ge(max_abs / 6.0)
+    E8M0 = log2(scale) + 127, clamped to [1, 254]; E8M0 = 0 if max_abs = 0
+    scales[m, b] = E8M0
+    For each i in [0, 32):
+      nibble = nearest_FP4(x[m, b*32 + i] / float(scale))
+    Pack nibbles[0:16] (high) and nibbles[16:32] (low) into y[m, b*16 : (b+1)*16]
+</pre>
+
+<h2>Implementation Requirements</h2>
+<ul>
+  <li>External libraries are not permitted</li>
+  <li>The <code>solve</code> function signature must remain unchanged</li>
+  <li>FP4 nibbles packed in <code>y</code>; E8M0 scales in <code>scales</code></li>
+  <li>All computation must occur on the GPU</li>
+  <li>Each (token, block) pair is independent and may be computed in parallel</li>
+</ul>
+
+<h2>Example</h2>
+<p>
+Input: One token with \(K=32\) features:
+</p>
+<pre>
+[-6.0, -4.0, -2.0, -0.5,  0.0,  0.5,  2.0,  4.0,
+ -3.0, -1.0,  1.0,  3.0,  1.5, -1.5,  0.0,  6.0,
+  0.0,  3.0, -1.5,  0.5,  2.0, -0.5, -3.0,  1.0,
+  6.0,  4.0, -2.0,  0.0,  1.5, -4.0, -6.0, -1.0]
+</pre>
+<p>
+max_abs = 6.0, scale = \(2^0 = 1.0\), E8M0 = 127<br>
+\(-6.0/1.0 = -6.0 \to 0xF\), \(-4.0 \to 0xE\), \(-2.0 \to 0xC\), \(-0.5 \to 0x9\)<br>
+\(0.0 \to 0x0\), \(0.5 \to 0x1\), \(2.0 \to 0x4\), \(4.0 \to 0x6\), etc.
+</p>
+<p>
+Output: \(y\) (\(M=1, K/2=16\)) = packed FP4 nibbles<br>
+scales (\(M=1, K/32=1\)) = [127]
+</p>
+
+<h2>Constraints</h2>
+<ul>
+  <li><code>K</code> is a multiple of 32</li>
+  <li>1 &le; <code>M</code> &le; 8,192</li>
+  <li>32 &le; <code>K</code> &le; 65,536</li>
+  <li>Input <code>x</code> is float32; output <code>y</code> and <code>scales</code> are uint8</li>
+  <li>The matrix <code>x</code> is stored in row-major order</li>
+  <li>Performance is measured with <code>M</code> = 4,096, <code>K</code> = 4,096</li>
+</ul>
