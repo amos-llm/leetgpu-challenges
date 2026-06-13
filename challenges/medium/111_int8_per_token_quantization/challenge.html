@@ -1,0 +1,70 @@
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+<p>
+  Implement dynamic per-token (per-row) symmetric INT8 quantization of a float32 matrix.
+  This is the activation quantization scheme used in production LLM serving systems like
+  vLLM and TensorRT-LLM, where each token's hidden state is independently quantized
+  before being fed into INT8 matrix multiplication kernels.
+  Given a float32 matrix \(x\) of shape \(M \times K\), compute per-row scales and INT8
+  quantized values.
+</p>
+
+<h2>Algorithm</h2>
+<pre>
+For each row m in [0, M):
+  max_abs_m = max(|x[m,k]|) over all k in [0, K)
+  scale_m = max_abs_m / 127.0
+  If max_abs_m == 0: scale_m = 1.0
+  For each k in [0, K):
+    y[m,k] = clamp(round(x[m,k] / scale_m), -128, 127)
+  scales[m] = scale_m  (stored as FP32)
+</pre>
+
+<h2>Implementation Requirements</h2>
+<ul>
+  <li>External libraries are not permitted</li>
+  <li>The <code>solve</code> function signature must remain unchanged</li>
+  <li>INT8 results in <code>y</code>; per-row FP32 scales in <code>scales</code></li>
+  <li>All computation must occur on the GPU</li>
+  <li>Rows are independent and may be computed in parallel</li>
+  <li>Use FP32 for intermediate computation to ensure accuracy</li>
+</ul>
+
+<h2>Example</h2>
+<p>
+Input: Matrix \(x\) (\(M=2, K=3\)):
+\[
+\begin{bmatrix}
+3.0 & -1.0 & 0.0 \\
+1.0 & 2.0 & 3.0
+\end{bmatrix}
+\]
+</p>
+<p>
+Row 0: max_abs=3.0, scale=0.02362<br>
+\(y[0] = [127, -42, 0]\)
+</p>
+<p>
+Row 1: max_abs=3.0, scale=0.02362<br>
+\(y[1] = [42, 85, 127]\)
+</p>
+<p>
+Output: Matrix \(y\):
+\[
+\begin{bmatrix}
+127 & -42 & 0 \\
+42 & 85 & 127
+\end{bmatrix}
+\]
+<br>
+scales = \([0.02362, 0.02362]\) (FP32)
+</p>
+
+<h2>Constraints</h2>
+<ul>
+  <li>1 &le; <code>M</code> &le; 8,192</li>
+  <li>1 &le; <code>K</code> &le; 32,768</li>
+  <li>Input <code>x</code> is float32; output <code>y</code> is int8; <code>scales</code> is FP32</li>
+  <li>All tensors stored in row-major order</li>
+  <li>Performance is measured with <code>M</code> = 4,096, <code>K</code> = 4,096</li>
+</ul>
