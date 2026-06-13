@@ -6,9 +6,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ c.name }} - LeetGPU Challenges</title>
   <link rel="stylesheet" href="{{ root }}/assets/css/style.css">
-  <link id="prism-dark" rel="stylesheet"
+  <link id="prism-dark" rel="stylesheet" media="all"
     href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
-  <link id="prism-light" rel="stylesheet"
+  <link id="prism-light" rel="stylesheet" media="none"
     href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css">
   <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
 </head>
@@ -17,13 +17,14 @@
 
   <header>
     <div class="header-inner">
-      <nav class="breadcrumb">
-        <a href="{{ root }}/">Home</a>
-        <span class="sep">/</span>
-        <a href="{{ root }}/?difficulty={{ c.difficulty }}">{{ c.difficulty }}</a>
-        <span class="sep">/</span>
-        <span>{{ c.slug }}</span>
-      </nav>
+      <div class="header-left">
+        <a href="{{ root }}/" class="logo">LeetGPU <span class="logo-sub">Challenges</span></a>
+        <nav class="breadcrumb">
+          <a href="{{ root }}/?difficulty={{ c.difficulty }}">{{ c.difficulty }}</a>
+          <span class="sep">/</span>
+          <span>{{ c.slug }}</span>
+        </nav>
+      </div>
       <button id="theme-toggle" class="theme-btn" aria-label="Toggle theme">
         <svg class="sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
           stroke-width="2">
@@ -51,11 +52,56 @@
           <div class="challenge-body">
             {{ c.html_content }}
           </div>
+
+          {% if c.related %}
+          <nav class="related-section">
+            <span class="related-label">Related:</span>
+            {% for r in c.related %}
+            <a href="{{ root }}/challenges/{{ r.difficulty }}/{{ r.slug }}/" class="related-link">#{{ r.number }} {{ r.name }}</a>
+            {% endfor %}
+          </nav>
+          {% endif %}
         </div>
 
         <div class="detail-code">
+          {% if c.starter_files %}
+          <section class="code-section">
+            <h2 class="code-section-title">Starter Templates</h2>
+            <p class="code-section-desc">Empty templates to start your own solution.</p>
+            <div class="code-tabs" data-group="starter">
+              <nav class="tab-nav">
+                {% for f in c.starter_files %}
+                <button class="tab-btn {% if loop.first %}active{% endif %}" data-tab="starter-{{ loop.index0 }}">{{
+                  f.name
+                  }}</button>
+                {% endfor %}
+              </nav>
+              {% for f in c.starter_files %}
+              <div class="tab-panel {% if loop.first %}active{% endif %}" data-panel="starter-{{ loop.index0 }}">
+                <div class="code-block-wrapper">
+                  <button class="copy-btn" aria-label="Copy code">
+                    <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                      stroke-width="2">
+                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                    <svg class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                      stroke-width="2">
+                      <polyline points="20 6 9 17 4 12"></polyline>
+                    </svg>
+                  </button>
+                  <pre><code class="language-{{ f.language }}">{{ f.content | e }}</code></pre>
+                </div>
+              </div>
+              {% endfor %}
+            </div>
+          </section>
+          {% endif %}
+
           {% if c.solution_files %}
           <section class="code-section">
+            <h2 class="code-section-title">Reference Solutions</h2>
+            <p class="code-section-desc">Complete reference implementations.</p>
             <div class="code-tabs" data-group="solution">
               <nav class="tab-nav">
                 {% for f in c.solution_files %}
@@ -106,7 +152,7 @@
         <span></span>
         {% endif %}
       </nav>
-    </div>
+	    </div>
 
   </article>
 

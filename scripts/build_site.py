@@ -47,6 +47,19 @@ def get_number_from_dirname(name: str) -> int:
     return int(match.group(1)) if match else 0
 
 
+def extract_snippet(html_content: str) -> str:
+    """Extract the first meaningful paragraph as a card snippet."""
+    paragraphs = re.findall(r"<p[^>]*>(.*?)</p>", html_content, re.DOTALL)
+    for p in paragraphs:
+        text = re.sub(r"<[^>]+>", "", p)
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) > 40:
+            return text[:200]
+    text = re.sub(r"<[^>]+>", "", html_content)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:200]
+
+
 def read_challenge_html(path: Path) -> str:
     if not path.exists():
         return ""
@@ -142,11 +155,10 @@ def extract_challenges() -> list[dict]:
             html_content = read_challenge_html(challenge_html_file)
             meta["html_content"] = html_content
 
-            snippet = re.sub(r"<[^>]+>", "", html_content)
-            snippet = re.sub(r"\s+", " ", snippet).strip()[:200]
-            meta["snippet"] = snippet
+            meta["snippet"] = extract_snippet(html_content)
 
             meta["solution_files"] = get_framework_files(entry / "solution")
+            meta["starter_files"] = get_framework_files(entry / "starter")
 
             challenges.append(meta)
     return challenges
@@ -172,8 +184,47 @@ def build_site():
     for c in challenges:
         frameworks = [f["name"] for f in c["solution_files"]]
         c["framework_attr"] = ",".join(frameworks)
+        c["framework_list"] = frameworks
         for fw in frameworks:
             fw_counts[fw] += 1
+
+    # Compute related challenges by keyword overlap in names
+    _STOP = {
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "of",
+        "in",
+        "on",
+        "to",
+        "for",
+        "with",
+        "by",
+        "at",
+        "from",
+    }
+    for c in challenges:
+        name_words = set(
+            w.lower()
+            for w in re.findall(r"\w+", c["name"])
+            if w.lower() not in _STOP and len(w) > 1
+        )
+        scored = []
+        for other in challenges:
+            if other["slug"] == c["slug"]:
+                continue
+            other_words = set(
+                w.lower()
+                for w in re.findall(r"\w+", other["name"])
+                if w.lower() not in _STOP and len(w) > 1
+            )
+            overlap = len(name_words & other_words)
+            if overlap > 0:
+                scored.append((overlap, other))
+        scored.sort(key=lambda x: (-x[0], x[1]["number"]))
+        c["related"] = [o for _, o in scored[:4]]
 
     # Clean output dir
     if OUTPUT_DIR.exists():
