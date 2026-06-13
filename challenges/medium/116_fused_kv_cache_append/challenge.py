@@ -165,8 +165,12 @@ class Challenge(ChallengeBase):
                     device=self.device,
                     dtype=dtype,
                 ),
-                "K_cache": torch.empty(M, 2, 4, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
-                "V_cache": torch.empty(M, 2, 4, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
+                "K_cache": torch.empty(M, 2, 4, device=self.device, dtype=dtype).uniform_(
+                    -1.0, 1.0
+                ),
+                "V_cache": torch.empty(M, 2, 4, device=self.device, dtype=dtype).uniform_(
+                    -1.0, 1.0
+                ),
                 "seq_len": 1,
                 "output": torch.zeros(2, 4, device=self.device, dtype=dtype),
                 "H": 2,
@@ -182,8 +186,12 @@ class Challenge(ChallengeBase):
                 "Q": torch.empty(H, D, device=self.device, dtype=dtype).uniform_(-0.1, 0.1),
                 "K_new": torch.empty(H, D, device=self.device, dtype=dtype).uniform_(-0.1, 0.1),
                 "V_new": torch.empty(H, D, device=self.device, dtype=dtype).uniform_(-0.1, 0.1),
-                "K_cache": torch.empty(B, H, D, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
-                "V_cache": torch.empty(B, H, D, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
+                "K_cache": torch.empty(B, H, D, device=self.device, dtype=dtype).uniform_(
+                    -1.0, 1.0
+                ),
+                "V_cache": torch.empty(B, H, D, device=self.device, dtype=dtype).uniform_(
+                    -1.0, 1.0
+                ),
                 "seq_len": seq_len,
                 "output": torch.zeros(H, D, device=self.device, dtype=dtype),
                 "H": H,
@@ -199,8 +207,12 @@ class Challenge(ChallengeBase):
                 "Q": torch.empty(H, D, device=self.device, dtype=dtype).uniform_(-0.1, 0.1),
                 "K_new": torch.empty(H, D, device=self.device, dtype=dtype).uniform_(-0.1, 0.1),
                 "V_new": torch.empty(H, D, device=self.device, dtype=dtype).uniform_(-0.1, 0.1),
-                "K_cache": torch.empty(B, H, D, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
-                "V_cache": torch.empty(B, H, D, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
+                "K_cache": torch.empty(B, H, D, device=self.device, dtype=dtype).uniform_(
+                    -1.0, 1.0
+                ),
+                "V_cache": torch.empty(B, H, D, device=self.device, dtype=dtype).uniform_(
+                    -1.0, 1.0
+                ),
                 "seq_len": seq_len,
                 "output": torch.zeros(H, D, device=self.device, dtype=dtype),
                 "H": H,
@@ -216,8 +228,12 @@ class Challenge(ChallengeBase):
                 "Q": torch.empty(H, D, device=self.device, dtype=dtype).uniform_(-0.1, 0.1),
                 "K_new": torch.empty(H, D, device=self.device, dtype=dtype).uniform_(-0.1, 0.1),
                 "V_new": torch.empty(H, D, device=self.device, dtype=dtype).uniform_(-0.1, 0.1),
-                "K_cache": torch.empty(B, H, D, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
-                "V_cache": torch.empty(B, H, D, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
+                "K_cache": torch.empty(B, H, D, device=self.device, dtype=dtype).uniform_(
+                    -1.0, 1.0
+                ),
+                "V_cache": torch.empty(B, H, D, device=self.device, dtype=dtype).uniform_(
+                    -1.0, 1.0
+                ),
                 "seq_len": seq_len,
                 "output": torch.zeros(H, D, device=self.device, dtype=dtype),
                 "H": H,
@@ -233,8 +249,12 @@ class Challenge(ChallengeBase):
                 "Q": torch.empty(H, D, device=self.device, dtype=dtype).uniform_(-0.1, 0.1),
                 "K_new": torch.empty(H, D, device=self.device, dtype=dtype).uniform_(-0.1, 0.1),
                 "V_new": torch.empty(H, D, device=self.device, dtype=dtype).uniform_(-0.1, 0.1),
-                "K_cache": torch.empty(B, H, D, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
-                "V_cache": torch.empty(B, H, D, device=self.device, dtype=dtype).uniform_(-1.0, 1.0),
+                "K_cache": torch.empty(B, H, D, device=self.device, dtype=dtype).uniform_(
+                    -1.0, 1.0
+                ),
+                "V_cache": torch.empty(B, H, D, device=self.device, dtype=dtype).uniform_(
+                    -1.0, 1.0
+                ),
                 "seq_len": seq_len,
                 "output": torch.zeros(H, D, device=self.device, dtype=dtype),
                 "H": H,

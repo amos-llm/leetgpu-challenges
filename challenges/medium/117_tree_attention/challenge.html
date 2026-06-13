@@ -1,0 +1,144 @@
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+<p>
+  Implement a GPU kernel that computes scaled dot-product attention over a tree-structured
+  token layout, where each token may only attend to its ancestor chain (the path from the
+  tree root to itself). In speculative decoding, draft tokens form a tree, and the
+  verification forward pass must compute tree attention without materializing a
+  <code>T &times; T</code> attention mask. The kernel must traverse each token's ancestor
+  chain, compute dot-product scores only along that path, and output the attention-weighted
+  sum.
+</p>
+
+<svg width="640" height="300" style="display:block; margin:20px auto;">
+  <defs>
+    <marker id="ah" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0,8 3,0 6" fill="#999"/>
+    </marker>
+  </defs>
+  <rect width="640" height="300" fill="#222" rx="8"/>
+
+  <!-- Tree nodes -->
+  <circle cx="320" cy="30" r="22" fill="#2d5a27" stroke="#5a9c52" stroke-width="2"/>
+  <text x="320" y="37" fill="#ccc" font-family="monospace" font-size="16" text-anchor="middle">0</text>
+  <text x="320" y="62" fill="#aaa" font-family="monospace" font-size="9" text-anchor="middle">root</text>
+
+  <circle cx="180" cy="130" r="22" fill="#1a3a5c" stroke="#7ec8e3" stroke-width="1.5"/>
+  <text x="180" y="137" fill="#7ec8e3" font-family="monospace" font-size="16" text-anchor="middle">1</text>
+
+  <circle cx="460" cy="130" r="22" fill="#1a3a5c" stroke="#7ec8e3" stroke-width="1.5"/>
+  <text x="460" y="137" fill="#7ec8e3" font-family="monospace" font-size="16" text-anchor="middle">2</text>
+
+  <!-- Edges -->
+  <line x1="302" y1="48" x2="196" y2="110" stroke="#999" stroke-width="1.5"/>
+  <line x1="338" y1="48" x2="444" y2="110" stroke="#999" stroke-width="1.5"/>
+
+  <!-- Attention chains on the right -->
+  <rect x="530" y="20" width="90" height="26" fill="#2d3a5c" rx="4"/>
+  <text x="575" y="38" fill="#7ec8e3" font-family="monospace" font-size="11" text-anchor="middle">Attends to [0]</text>
+
+  <rect x="530" y="110" width="90" height="26" fill="#2d3a5c" rx="4"/>
+  <text x="575" y="128" fill="#7ec8e3" font-family="monospace" font-size="11" text-anchor="middle">Attends to [1,0]</text>
+
+  <rect x="530" y="200" width="90" height="26" fill="#2d3a5c" rx="4"/>
+  <text x="575" y="218" fill="#7ec8e3" font-family="monospace" font-size="11" text-anchor="middle">Attends to [2,0]</text>
+
+  <!-- Example flow: Q/K/V all tokens on left -->
+  <rect x="20" y="190" width="80" height="36" fill="#1a3a5c" rx="4"/>
+  <text x="60" y="213" fill="#7ec8e3" font-family="monospace" font-size="12" text-anchor="middle">Q, K, V</text>
+
+  <rect x="20" y="240" width="80" height="36" fill="#1a3a5c" rx="4"/>
+  <text x="60" y="263" fill="#7ec8e3" font-family="monospace" font-size="11" text-anchor="middle">parents</text>
+
+  <line x1="100" y1="208" x2="155" y2="208" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+  <line x1="100" y1="258" x2="155" y2="258" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <!-- Kernel box -->
+  <rect x="155" y="195" width="130" height="48" fill="#2d5a27" rx="4"/>
+  <text x="220" y="215" fill="#ccc" font-family="monospace" font-size="12" text-anchor="middle">Tree Attention</text>
+  <text x="220" y="233" fill="#5a9c52" font-family="monospace" font-size="9" text-anchor="middle">per-token ancestor walk</text>
+
+  <line x1="285" y1="219" x2="375" y2="219" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+  <rect x="375" y="195" width="80" height="48" fill="#1a5c2d" rx="4"/>
+  <text x="415" y="223" fill="#7ec8e3" font-family="monospace" font-size="12" text-anchor="middle">output</text>
+
+  <text x="415" y="265" fill="#aaa" font-family="monospace" font-size="10" text-anchor="middle">(T, D)</text>
+</svg>
+
+<p>
+  Given <code>parents[i]</code> &mdash; the index of token <code>i</code>'s parent in the
+  tree (with <code>parents[root] = &minus;1</code>), tokens are guaranteed to be ordered
+  such that <code>parents[i] &lt; i</code> for all non-root tokens. Each token
+  <code>i</code> may only attend to itself and its ancestors:
+</p>
+<p>
+  \[
+  \text{ancestors}(i) = \{ i, \text{parents}[i], \text{parents}[\text{parents}[i]], \dots, \text{root} \}
+  \]
+  \[
+  \text{out}[i] = \sum_{j \in \text{ancestors}(i)}
+  \left(
+  \frac{\exp(Q[i] \cdot K[j]^T / \sqrt{D})}
+  {\sum_{k \in \text{ancestors}(i)} \exp(Q[i] \cdot K[k]^T / \sqrt{D})}
+  \right)
+  \cdot V[j]
+  \]
+</p>
+<p>
+  The key challenge is to walk each token's ancestor chain without materializing the full
+  <code>T &times; T</code> attention mask, which would waste <code>O(T&sup2;)</code> memory.
+  A correct solution must compute scores, softmax, and value weighting using only the
+  ancestor path for each token.
+</p>
+
+<h2>Implementation Requirements</h2>
+<ul>
+  <li>Do not change the function signature.</li>
+  <li>Do not use external libraries beyond what is available in the starter.</li>
+  <li>Tokens are ordered such that <code>parents[i] &lt; i</code> for all non-root tokens.</li>
+  <li>The kernel must compute attention per token using only its ancestor chain &mdash;
+      do not materialize a <code>T &times; T</code> mask or score matrix in global memory.</li>
+  <li><code>parents</code> is an int32 array; the root token has <code>parents[root] = &minus;1</code>.</li>
+</ul>
+
+<h2>Example</h2>
+<p>
+  T = 3, D = 2. A root with two children:
+</p>
+<p>
+  \[
+  Q = \begin{bmatrix} 1.0 & 0.0 \\ 0.0 & 1.0 \\ 0.0 & 0.0 \end{bmatrix} \quad
+  K = \begin{bmatrix} 1.0 & 0.0 \\ 0.0 & 1.0 \\ 1.0 & 0.0 \end{bmatrix} \quad
+  V = \begin{bmatrix} 1.0 & 2.0 \\ 3.0 & 4.0 \\ 5.0 & 6.0 \end{bmatrix}
+  \]
+  \[
+  \text{parents} = \begin{bmatrix} -1 & 0 & 0 \end{bmatrix}
+  \]
+</p>
+<p>
+  Each token's output:
+</p>
+<p>
+  \[
+  \text{out}[0] = \text{softmax}\!\left(\frac{Q[0] \cdot K[0]^T}{\sqrt{2}}\right) \cdot V[0]
+  = \begin{bmatrix} 1.0000 & 2.0000 \end{bmatrix}
+  \]
+  \[
+  \text{out}[1] = \text{softmax}\!\left(\frac{Q[1] \cdot [K[1], K[0]]^T}{\sqrt{2}}\right) \cdot [V[1], V[0]]
+  \approx \begin{bmatrix} 2.3395 & 3.3395 \end{bmatrix}
+  \]
+  \[
+  \text{out}[2] = \text{softmax}\!\left(\frac{Q[2] \cdot [K[2], K[0]]^T}{\sqrt{2}}\right) \cdot [V[2], V[0]]
+  = \begin{bmatrix} 3.0000 & 4.0000 \end{bmatrix}
+  \]
+</p>
+
+<h2>Constraints</h2>
+<ul>
+  <li>1 &le; <code>T</code> &le; 65,536 (total tokens in tree)</li>
+  <li>1 &le; <code>D</code> &le; 256 (head dimension)</li>
+  <li><code>parents[i]</code> = &minus;1 for the root; <code>0 &le; parents[i] &lt; i</code> for all others</li>
+  <li><code>Q</code>, <code>K</code>, <code>V</code>, and <code>output</code> are float32; <code>parents</code> is int32</li>
+  <li>Performance is measured with <code>T</code> = 1,024, <code>D</code> = 128</li>
+</ul>
