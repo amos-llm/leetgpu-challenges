@@ -30,8 +30,8 @@
 
   <section class="hero">
     <h1>GPU Programming Challenges</h1>
-    <p class="hero-sub">A collection of {{ total }} GPU challenges spanning Easy to Hard, with solutions in <strong>{{
-        all_frameworks|length }}</strong> frameworks.</p>
+    <p class="hero-sub">{{ total }} hands-on GPU programming challenges — from vector addition to Flash Attention. Solve
+      in <strong>{{ all_frameworks|length }}</strong> frameworks and compare with reference solutions.</p>
   </section>
 
   <section class="controls">
@@ -76,12 +76,20 @@
       <p class="card-snippet">{{ c.snippet }}</p>
       {% endif %}
       <div class="card-meta">
-        {% if c.solution_files %}
-        <span class="frameworks">{{ c.solution_files|length }} frameworks</span>
+        {% if c.framework_list %}
+        <span class="card-fw-tags">
+          {% for fw in c.framework_list[:4] %}
+          <span class="fw-tag">{{ fw }}</span>
+          {% endfor %}
+          {% if c.framework_list|length > 4 %}
+          <span class="fw-tag fw-tag-more">+{{ c.framework_list|length - 4 }}</span>
+          {% endif %}
+        </span>
         {% endif %}
       </div>
     </a>
     {% endfor %}
+    <p class="empty-state" id="empty-state" hidden>No challenges match your filters.</p>
   </main>
 
   <footer>
