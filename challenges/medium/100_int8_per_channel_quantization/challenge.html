@@ -1,0 +1,73 @@
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+<p>
+  Implement per-channel symmetric INT8 quantization of a float32 weight matrix.
+  This is the standard weight quantization scheme used in TensorRT, ONNX Runtime,
+  and TFLite. Given a float32 matrix \(x\) of shape \(M \times K\), compute
+  per-output-channel scales and INT8 quantized values.
+</p>
+
+<p>
+  Each column (channel) \(k\) gets an independent scale computed from the
+  maximum absolute value within that column.
+</p>
+
+<h2>Algorithm</h2>
+<pre>
+For each column k in [0, K):
+  max_abs_k = max(|x[i,k]|) over all i in [0, M)
+  scale_k = max_abs_k / 127.0
+  If max_abs_k == 0: scale_k = 1.0
+  For each i in [0, M):
+    y[i,k] = clamp(round(x[i,k] / scale_k), -128, 127)
+</pre>
+
+<h2>Implementation Requirements</h2>
+<ul>
+  <li>External libraries are not permitted</li>
+  <li>The <code>solve</code> function signature must remain unchanged</li>
+  <li>INT8 results in <code>y</code>; per-channel float32 scales in <code>scales</code></li>
+  <li>All computation must occur on the GPU</li>
+  <li>Channels (columns) are independent and may be computed in parallel</li>
+</ul>
+
+<h2>Example</h2>
+<p>
+Input: Matrix \(x\) (\(M=2, K=2\)):
+\[
+\begin{bmatrix}
+3.0 & -1.0 \\
+0.0 & 2.0
+\end{bmatrix}
+\]
+</p>
+<p>
+Column 0: max_abs=3.0, scale=0.02362<br>
+\(y[0,0] = \text{clamp}(\text{round}(3.0/0.02362), -128, 127) = 127\)<br>
+\(y[1,0] = \text{clamp}(\text{round}(0.0/0.02362), -128, 127) = 0\)
+</p>
+<p>
+Column 1: max_abs=2.0, scale=0.01575<br>
+\(y[0,1] = \text{clamp}(\text{round}(-1.0/0.01575), -128, 127) = -63\)<br>
+\(y[1,1] = \text{clamp}(\text{round}(2.0/0.01575), -128, 127) = 127\)
+</p>
+<p>
+Output: Matrix \(y\):
+\[
+\begin{bmatrix}
+127 & -63 \\
+0 & 127
+\end{bmatrix}
+\]
+<br>
+scales = \([0.02362, 0.01575]\)
+</p>
+
+<h2>Constraints</h2>
+<ul>
+  <li>1 &le; <code>M</code> &le; 65,536</li>
+  <li>1 &le; <code>K</code> &le; 65,536</li>
+  <li>Input <code>x</code> is float32; output <code>y</code> is int8; <code>scales</code> is float32</li>
+  <li>All tensors stored in row-major order</li>
+  <li>Performance is measured with <code>M</code> = 4,096, <code>K</code> = 4,096</li>
+</ul>
