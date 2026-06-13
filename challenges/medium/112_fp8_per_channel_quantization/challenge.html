@@ -1,0 +1,90 @@
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+<p>
+  Implement per-channel FP8 E4M3 quantization of a float32 weight matrix.
+  This parallels INT8 per-channel quantization used in TensorRT and ONNX Runtime,
+  replacing the INT8 target format with the OCP FP8 E4M3 format used on NVIDIA H100
+  and AMD MI300X GPUs.
+  Given a float32 matrix \(x\) of shape \(M \times K\), compute per-output-channel
+  scales and encode each element to FP8 E4M3.
+</p>
+
+<p>
+  Each column (channel) \(k\) gets an independent scale computed from the
+  maximum absolute value within that column. The scale maps the column's range
+  to the FP8 E4M3 representable range of &pm;448.
+</p>
+
+<h2>FP8 E4M3 Format</h2>
+<ul>
+  <li>Bit layout: \([S|E_3|E_2|E_1|E_0|M_2|M_1|M_0]\), bias = 7, max normal = 448</li>
+  <li>Normal: \((-1)^S \times 2^{E-7} \times 1.M\)</li>
+  <li>Subnormal (exp=0000): \((-1)^S \times 2^{-6} \times 0.M\)</li>
+  <li>NaN: encode as 0x7F. Overflow: clamp to &pm;448</li>
+</ul>
+
+<h2>Algorithm</h2>
+<pre>
+For each column k in [0, K):
+  max_abs_k = max(|x[i,k]|) over all i in [0, M)
+  scale_k = max_abs_k / 448.0
+  If max_abs_k == 0: scale_k = 1.0
+  For each i in [0, M):
+    y[i,k] = fp8_e4m3(x[i,k] / scale_k)
+  scales[k] = scale_k
+</pre>
+
+<h2>Implementation Requirements</h2>
+<ul>
+  <li>External libraries are not permitted</li>
+  <li>The <code>solve</code> function signature must remain unchanged</li>
+  <li>FP8 encodings in <code>y</code> (uint8); per-channel scales in <code>scales</code> (float32)</li>
+  <li>All computation must occur on the GPU</li>
+  <li>Channels (columns) are independent and may be computed in parallel</li>
+</ul>
+
+<h2>Example</h2>
+<p>
+Input: Matrix \(x\) (\(M=2, K=3\)):
+\[
+\begin{bmatrix}
+120.0 & 0.5 & 0.0 \\
+-60.0 & 1.0 & 0.0
+\end{bmatrix}
+\]
+</p>
+<p>
+Column 0: max_abs=120.0, scale=0.2678...<br>
+\(y[0,0] = \text{fp8_e4m3}(448.0) = \text{0x7E}\)<br>
+\(y[1,0] = \text{fp8_e4m3}(-224.0) = \text{0xF6}\)
+</p>
+<p>
+Column 1: max_abs=1.0, scale=0.002232...<br>
+\(y[0,1] = \text{fp8_e4m3}(224.0) = \text{0x76}\)<br>
+\(y[1,1] = \text{fp8_e4m3}(448.0) = \text{0x7E}\)
+</p>
+<p>
+Column 2: max_abs=0.0, scale=1.0<br>
+\(y[0,2] = \text{fp8_e4m3}(0.0) = \text{0x00}\)<br>
+\(y[1,2] = \text{fp8_e4m3}(0.0) = \text{0x00}\)
+</p>
+<p>
+Output: Matrix \(y\):
+\[
+\begin{bmatrix}
+\text{0x7E} & \text{0x76} & \text{0x00} \\
+\text{0xF6} & \text{0x7E} & \text{0x00}
+\end{bmatrix}
+\]
+<br>
+scales = \([0.2678..., 0.002232..., 1.0]\)
+</p>
+
+<h2>Constraints</h2>
+<ul>
+  <li>1 &le; <code>M</code> &le; 65,536</li>
+  <li>1 &le; <code>K</code> &le; 65,536</li>
+  <li>Input <code>x</code> is float32; output <code>y</code> is uint8; <code>scales</code> is float32</li>
+  <li>All tensors stored in row-major order</li>
+  <li>Performance is measured with <code>M</code> = 4,096, <code>K</code> = 4,096</li>
+</ul>
