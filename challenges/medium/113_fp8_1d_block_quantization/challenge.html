@@ -1,0 +1,113 @@
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+<p>
+  Implement 1D block-wise FP8 E4M3 quantization of a float32 activation matrix.
+  This is the 1D scaling scheme used in DeepGEMM for activation matrices (A),
+  where each token's feature dimension is partitioned into blocks of size
+  <code>BLOCK_SIZE</code> and each block gets its own scale
+  (<code>scale_granularity_mnk = (1, 128, 128)</code> in DeepGEMM).
+  This provides finer granularity than per-token quantization (challenge 107)
+  and is the activation counterpart to 2D block quantization (challenge 108).
+</p>
+
+<p>
+  Given a float32 matrix \(x\) of shape \(M \times K\) (\(M\) tokens, \(K\) features),
+  for each of the \(M\) rows, partition the \(K\) features into \(G = \lceil K /
+  \text{BLOCK\_SIZE} \rceil\) contiguous blocks. Each block is quantized using its
+  own scale derived from the maximum absolute value within that block.
+</p>
+
+<h2>FP8 E4M3 Format</h2>
+<ul>
+  <li>Bit layout: \([S|E_3|E_2|E_1|E_0|M_2|M_1|M_0]\), bias = 7, max normal = 448</li>
+  <li>Normal: \((-1)^S \times 2^{E-7} \times 1.M\)</li>
+  <li>Subnormal (exp=0000): \((-1)^S \times 2^{-6} \times 0.M\)</li>
+  <li>NaN: encode as 0x7F. Overflow: clamp to &pm;448</li>
+</ul>
+
+<h2>Algorithm</h2>
+<pre>
+G = ceil(K / BLOCK_SIZE)
+For each row m in [0, M):
+  For each block g in [0, G):
+    k_start = g * BLOCK_SIZE
+    k_end = min(k_start + BLOCK_SIZE, K)
+    max_abs = max(|x[m,k]|) over k in [k_start, k_end)
+    scale = max_abs / 448.0
+    If max_abs == 0: scale = 1.0
+    For each k in [k_start, k_end):
+      y[m,k] = fp8_e4m3(x[m,k] / scale)
+    scales[m,g] = scale
+</pre>
+
+<h2>Implementation Requirements</h2>
+<ul>
+  <li>External libraries are not permitted</li>
+  <li>The <code>solve</code> function signature must remain unchanged</li>
+  <li>FP8 encodings in <code>y</code> (uint8); 1D block scales in <code>scales</code> (float32)</li>
+  <li>All computation must occur on the GPU</li>
+  <li>Each (row, block) pair is independent and may be computed in parallel</li>
+  <li>The last block along <code>K</code> may be smaller than <code>BLOCK_SIZE</code></li>
+</ul>
+
+<h2>Example</h2>
+<p>
+Input: Matrix \(x\) (\(M=2, K=6\)), BLOCK_SIZE=3:
+\[
+\begin{bmatrix}
+240.0 & 120.0 & 60.0 & 1.0 & 2.0 & 0.0 \\
+-120.0 & 0.0 & 30.0 & 3.0 & 4.0 & 1.0
+\end{bmatrix}
+\]
+</p>
+<p>
+Row 0, Block 0 (\(k=0..2\)): max_abs=240.0, scale=0.5357...<br>
+\(y[0,0] = \text{fp8_e4m3}(448.0) = \text{0x7E}\)<br>
+\(y[0,1] = \text{fp8_e4m3}(224.0) = \text{0x76}\)<br>
+\(y[0,2] = \text{fp8_e4m3}(112.0) = \text{0x6E}\)
+</p>
+<p>
+Row 0, Block 1 (\(k=3..5\)): max_abs=2.0, scale=0.004464...<br>
+\(y[0,3] = \text{fp8_e4m3}(224.0) = \text{0x76}\)<br>
+\(y[0,4] = \text{fp8_e4m3}(448.0) = \text{0x7E}\)<br>
+\(y[0,5] = \text{fp8_e4m3}(0.0) = \text{0x00}\)
+</p>
+<p>
+Row 1, Block 0 (\(k=0..2\)): max_abs=120.0, scale=0.2678...<br>
+\(y[1,0] = \text{fp8_e4m3}(-448.0) = \text{0xFE}\)<br>
+\(y[1,1] = \text{fp8_e4m3}(0.0) = \text{0x00}\)<br>
+\(y[1,2] = \text{fp8_e4m3}(112.0) = \text{0x6E}\)
+</p>
+<p>
+Row 1, Block 1 (\(k=3..5\)): max_abs=4.0, scale=0.008928...<br>
+\(y[1,3] = \text{fp8_e4m3}(336.0) = \text{0x7A}\)<br>
+\(y[1,4] = \text{fp8_e4m3}(448.0) = \text{0x7E}\)<br>
+\(y[1,5] = \text{fp8_e4m3}(112.0) = \text{0x6E}\)
+</p>
+<p>
+Output: Matrix \(y\):
+\[
+\begin{bmatrix}
+\text{0x7E} & \text{0x76} & \text{0x6E} & \text{0x76} & \text{0x7E} & \text{0x00} \\
+\text{0xFE} & \text{0x00} & \text{0x6E} & \text{0x7A} & \text{0x7E} & \text{0x6E}
+\end{bmatrix}
+\]
+<br>
+scales =
+\[
+\begin{bmatrix}
+0.5357... & 0.004464... \\
+0.2678... & 0.008928...
+\end{bmatrix}
+\]
+</p>
+
+<h2>Constraints</h2>
+<ul>
+  <li>1 &le; <code>M</code> &le; 65,536</li>
+  <li>1 &le; <code>K</code> &le; 65,536</li>
+  <li><code>BLOCK_SIZE</code> in {32, 64, 128, 256}</li>
+  <li>Input <code>x</code> is float32; output <code>y</code> is uint8; <code>scales</code> is float32</li>
+  <li>All tensors stored in row-major order</li>
+  <li>Performance is measured with <code>M</code> = 4,096, <code>K</code> = 4,096, <code>BLOCK_SIZE</code> = 128</li>
+</ul>

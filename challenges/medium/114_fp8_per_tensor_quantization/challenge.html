@@ -1,0 +1,59 @@
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+<p>
+  Implement per-tensor float32 to FP8 E4M3 quantization.
+  Given a float32 array \(x\) of length \(N\), compute the per-tensor scale as
+  \(\text{max}(|x|) / 448\) and quantize each element by dividing by the scale
+  and converting to the OCP FP8 E4M3 format.
+  This is the simplest FP8 quantization scheme — one scale factor for the entire tensor
+  — used as the building block for more advanced per-token, per-channel, and block-wise
+  FP8 quantization on NVIDIA H100 and AMD MI300X GPUs.
+</p>
+
+<h2>FP8 E4M3 Format</h2>
+<ul>
+  <li>Bit layout: \([S|E_3|E_2|E_1|E_0|M_2|M_1|M_0]\), bias = 7, max normal = 448</li>
+  <li>Normal: \((-1)^S \times 2^{E-7} \times 1.M\)</li>
+  <li>Subnormal (exp=0000): \((-1)^S \times 2^{-6} \times 0.M\)</li>
+  <li>NaN: encode as 0x7F. Overflow: clamp to &pm;448</li>
+</ul>
+
+<h2>Algorithm</h2>
+<pre>
+max_abs = max(|x[i]|) over all i in [0, N)
+scale = max_abs / 448.0
+If max_abs == 0: scale = 1.0
+For each i in [0, N):
+  y[i] = fp8_e4m3(x[i] / scale)
+scale_out[0] = scale
+</pre>
+
+<h2>Implementation Requirements</h2>
+<ul>
+  <li>External libraries are not permitted</li>
+  <li>The <code>solve</code> function signature must remain unchanged</li>
+  <li>FP8 encodings in <code>y</code> (uint8); scale in <code>scale_out</code> (float32, single-element tensor)</li>
+  <li>All computation must occur on the GPU</li>
+</ul>
+
+<h2>Example</h2>
+<pre>
+Input:  x = [1.0, -2.0, 0.5, -0.25]
+        N = 4
+
+max(|x|) = 2.0
+scale = 2.0 / 448 = 0.0044642857...
+scaled = [224.0, -448.0, 112.0, -56.0]
+
+Output: y = [0x76, 0xFE, 0x6E, 0xE6]
+        scale_out = [0.0044642857...]
+(224.0 &rarr; 0x76, -448.0 clamped &rarr; 0xFE,
+ 112.0 &rarr; 0x6E, -56.0 &rarr; 0xE6)
+</pre>
+
+<h2>Constraints</h2>
+<ul>
+  <li>1 &le; <code>N</code> &le; 100,000,000</li>
+  <li>Input <code>x</code> is float32; output <code>y</code> is uint8; <code>scale_out</code> is float32</li>
+  <li>Performance is measured with <code>N</code> = 25,000,000</li>
+</ul>
