@@ -207,4 +207,4 @@ Verify every item before submitting. This is the single source of truth — work
 
 ### General
 - [ ] Directory follows `<number>_<name>` convention
-- [ ] Linting passes: `pre-commit run --all-files`
+- [ ] After any code change, run `pre-commit run --all-files`.

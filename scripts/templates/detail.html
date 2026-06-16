@@ -71,7 +71,8 @@
             <div class="code-tabs" data-group="starter">
               <nav class="tab-nav">
                 {% for f in c.starter_files %}
-                <button class="tab-btn {% if loop.first %}active{% endif %}" data-tab="starter-{{ loop.index0 }}">{{
+                <button class="tab-btn {% if loop.first %}active{% endif %}" data-tab="starter-{{ loop.index0 }}"
+                  data-hash="starter-{{ f.name | lower }}">{{
                   f.name
                   }}</button>
                 {% endfor %}
@@ -105,7 +106,8 @@
             <div class="code-tabs" data-group="solution">
               <nav class="tab-nav">
                 {% for f in c.solution_files %}
-                <button class="tab-btn {% if loop.first %}active{% endif %}" data-tab="solution-{{ loop.index0 }}">{{
+                <button class="tab-btn {% if loop.first %}active{% endif %}" data-tab="solution-{{ loop.index0 }}"
+                  data-hash="solution-{{ f.name | lower }}">{{
                   f.name
                   }}</button>
                 {% endfor %}
