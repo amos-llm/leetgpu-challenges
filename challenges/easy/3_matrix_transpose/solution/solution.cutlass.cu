@@ -3,68 +3,71 @@
 
 using namespace cute;
 
-template <typename LayoutSrc, typename LayoutDst, typename BlockShape, typename SmemLayoutSrc,
-          typename SmemLayoutDst, typename ThrLayout>
-__global__ void matrix_transpose_kernel(const float* src, float* dst, LayoutSrc layout_src,
-                                        LayoutDst layout_dst, BlockShape block_shape,
-                                        SmemLayoutSrc smem_layout_src,
-                                        SmemLayoutDst smem_layout_dst, ThrLayout thr_layout) {
-    auto g_src_tensor = make_tensor(make_gmem_ptr(src), layout_src);
-    auto g_dst_tensor = make_tensor(make_gmem_ptr(dst), layout_dst);
+template <typename LayoutS, typename LayoutD, typename CtaTiler, typename SmemLayoutS,
+          typename SmemLayoutD, typename ThrLayout>
+__global__ void transpose_kernel(const float* S, float* D, LayoutS layout_S, LayoutD layout_D,
+                                 CtaTiler cta_tiler, SmemLayoutS smem_S_layout,
+                                 SmemLayoutD smem_D_layout, ThrLayout thr_layout) {
+    Tensor tensor_S = make_tensor(make_gmem_ptr(S), layout_S);
+    Tensor tensor_D = make_tensor(make_gmem_ptr(D), layout_D);
 
-    auto src_shape = layout_src.shape();
-    auto src_identity = make_identity_tensor(src_shape);
-    auto g_src_pred =
-        cute::lazy::transform(src_identity, [&](auto i) { return elem_less(i, src_shape); });
+    auto shape_S = shape(tensor_S);
+    Tensor C_S = make_identity_tensor(shape_S);
+    Tensor P_S = cute::lazy::transform(C_S, [&](auto c) { return elem_less(c, shape_S); });
 
-    auto dst_shape = layout_dst.shape();
-    auto dst_identity = make_identity_tensor(dst_shape);
-    auto g_dst_pred =
-        cute::lazy::transform(dst_identity, [&](auto i) { return elem_less(i, dst_shape); });
+    auto shape_D = shape(tensor_D);
+    Tensor C_D = make_identity_tensor(shape_D);
+    Tensor P_D = cute::lazy::transform(C_D, [&](auto c) { return elem_less(c, shape_D); });
 
-    auto g_src_block = local_tile(g_src_tensor, block_shape, make_coord(blockIdx.x, blockIdx.y));
-    auto g_src_pred_block = local_tile(g_src_pred, block_shape, make_coord(blockIdx.x, blockIdx.y));
+    auto cta_coord_S = make_coord(blockIdx.x, blockIdx.y);
+    Tensor tile_S = local_tile(tensor_S, cta_tiler, cta_coord_S);
+    Tensor tile_P_S = local_tile(P_S, cta_tiler, cta_coord_S);
 
-    auto g_dst_block = local_tile(g_dst_tensor, block_shape, make_coord(blockIdx.y, blockIdx.x));
-    auto g_dst_pred_block = local_tile(g_dst_pred, block_shape, make_coord(blockIdx.y, blockIdx.x));
+    auto cta_coord_D = make_coord(blockIdx.y, blockIdx.x);
+    Tensor tile_D = local_tile(tensor_D, cta_tiler, cta_coord_D);
+    Tensor tile_P_D = local_tile(P_D, cta_tiler, cta_coord_D);
 
-    auto tg_src = local_partition(g_src_block, thr_layout, threadIdx.x);
-    auto tg_src_pred = local_partition(g_src_pred_block, thr_layout, threadIdx.x);
+    Tensor thr_tile_S = local_partition(tile_S, thr_layout, threadIdx.x);
+    Tensor thr_tile_P_S = local_partition(tile_P_S, thr_layout, threadIdx.x);
+    Tensor thr_tile_D = local_partition(tile_D, thr_layout, threadIdx.x);
+    Tensor thr_tile_P_D = local_partition(tile_P_D, thr_layout, threadIdx.x);
 
-    auto tg_dst = local_partition(g_dst_block, thr_layout, threadIdx.x);
-    auto tg_dst_pred = local_partition(g_dst_pred_block, thr_layout, threadIdx.x);
+    __shared__ float smem[cosize_v<SmemLayoutS>];
 
-    __shared__ float smem_buffer[cosize_v<SmemLayoutSrc>];
+    Tensor smem_S = make_tensor(make_smem_ptr(smem), smem_S_layout);
+    Tensor smem_D = make_tensor(make_smem_ptr(smem), smem_D_layout);
 
-    auto s_src_tensor = make_tensor(make_smem_ptr(smem_buffer), smem_layout_src);
-    auto s_dst_tensor = make_tensor(make_smem_ptr(smem_buffer), smem_layout_dst);
+    Tensor thr_smem_S = local_partition(smem_S, thr_layout, threadIdx.x);
+    Tensor thr_smem_D = local_partition(smem_D, thr_layout, threadIdx.x);
 
-    auto ts_src = local_partition(s_src_tensor, thr_layout, threadIdx.x);
-    auto ts_dst = local_partition(s_dst_tensor, thr_layout, threadIdx.x);
-
-    copy_if(tg_src_pred, tg_src, ts_src);
+    copy_if(thr_tile_P_S, thr_tile_S, thr_smem_S);
     __syncthreads();
-    copy_if(tg_dst_pred, ts_dst, tg_dst);
+    copy_if(thr_tile_P_D, thr_smem_D, thr_tile_D);
 }
 
 extern "C" void solve(const float* input, float* output, int rows, int cols) {
-    auto layout_src = make_layout(make_shape(rows, cols), GenRowMajor{});
-    auto layout_dst = make_layout(make_shape(cols, rows), GenRowMajor{});
+    auto M = int(rows);
+    auto N = int(cols);
 
-    auto block_shape = make_shape(_32{}, _32{});
-    auto thr_layout = make_layout(make_shape(_8{}, _32{}), GenRowMajor{});
+    auto layout_S = make_layout(make_shape(M, N), GenRowMajor{});
+    auto layout_D = make_layout(make_shape(N, M), GenRowMajor{});
 
-    auto tiled_src_layout = tiled_divide(layout_src, block_shape);
-    dim3 grid_dim(size<1>(tiled_src_layout), size<2>(tiled_src_layout));
+    auto bM = Int<32>{};
+    auto bN = Int<32>{};
+    auto cta_tiler = make_shape(bM, bN);
+
+    auto thr_layout = make_layout(make_shape(Int<8>{}, Int<32>{}), GenRowMajor{});
+
+    auto tiled_S = tiled_divide(layout_S, cta_tiler);
+    dim3 grid_dim(size<1>(tiled_S), size<2>(tiled_S));
     dim3 block_dim(size(thr_layout));
 
     auto swizzle = Swizzle<5, 0, 5>{};
-    auto smem_layout_src = composition(swizzle, make_layout(block_shape, GenRowMajor{}));
-    auto smem_layout_dst = composition(swizzle, make_layout(block_shape, GenColMajor{}));
+    auto smem_S_layout = composition(swizzle, make_layout(cta_tiler, GenRowMajor{}));
+    auto smem_D_layout = composition(swizzle, make_layout(cta_tiler, GenColMajor{}));
 
-    matrix_transpose_kernel<<<grid_dim, block_dim>>>(input, output, layout_src, layout_dst,
-                                                     block_shape, smem_layout_src, smem_layout_dst,
-                                                     thr_layout);
+    transpose_kernel<<<grid_dim, block_dim>>>(input, output, layout_S, layout_D, cta_tiler,
+                                              smem_S_layout, smem_D_layout, thr_layout);
 
     cudaDeviceSynchronize();
 }
