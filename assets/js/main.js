@@ -160,35 +160,61 @@
   /* ============================================================
      Code tabs (detail page)
      ============================================================ */
+  function activateCodeTab(group, btn) {
+    const buttons = group.querySelectorAll(".tab-btn");
+    buttons.forEach(function (b) { b.classList.remove("active"); });
+    group.querySelectorAll(".tab-panel").forEach(function (p) { p.classList.remove("active"); });
+
+    btn.classList.add("active");
+    const panel = group.querySelector('[data-panel="' + btn.dataset.tab + '"]');
+    if (panel) {
+      panel.classList.add("active");
+      if (typeof Prism !== "undefined") {
+        const code = panel.querySelector("code[class*='language-']");
+        if (code) Prism.highlightElement(code);
+      }
+    }
+  }
+
+  function getActiveHash() {
+    var h = window.location.hash.replace(/^#/, "");
+    return h || "";
+  }
+
   const codeTabsGroups = document.querySelectorAll(".code-tabs");
   codeTabsGroups.forEach(function (group) {
     const buttons = group.querySelectorAll(".tab-btn");
     buttons.forEach(function (btn) {
       btn.addEventListener("click", function () {
-        // Deactivate all in this group
-        buttons.forEach(function (b) {
-          b.classList.remove("active");
-        });
-        group.querySelectorAll(".tab-panel").forEach(function (p) {
-          p.classList.remove("active");
-        });
-
-        // Activate target
-        btn.classList.add("active");
-        const targetId = btn.dataset.tab;
-        const panel = group.querySelector(
-          '[data-panel="' + targetId + '"]'
-        );
-        if (panel) {
-          panel.classList.add("active");
-          // Highlight newly visible code block
-          if (typeof Prism !== "undefined") {
-            const code = panel.querySelector("code[class*='language-']");
-            if (code) Prism.highlightElement(code);
-          }
+        activateCodeTab(group, btn);
+        var hash = btn.dataset.hash;
+        if (hash) {
+          history.replaceState(null, "", "#" + hash);
         }
       });
     });
+  });
+
+  // Restore active tab from hash on load
+  (function initCodeTabsFromHash() {
+    var hash = getActiveHash();
+    if (!hash) return;
+    var targetBtn = document.querySelector('.tab-btn[data-hash="' + hash + '"]');
+    if (!targetBtn) return;
+    var group = targetBtn.closest(".code-tabs");
+    if (!group) return;
+    activateCodeTab(group, targetBtn);
+  })();
+
+  // Handle back/forward between code tabs
+  window.addEventListener("popstate", function () {
+    var hash = getActiveHash();
+    if (!hash) return;
+    var targetBtn = document.querySelector('.tab-btn[data-hash="' + hash + '"]');
+    if (!targetBtn) return;
+    var group = targetBtn.closest(".code-tabs");
+    if (!group) return;
+    activateCodeTab(group, targetBtn);
   });
 
   /* ============================================================
