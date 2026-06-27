@@ -199,6 +199,51 @@ header {
   display: block;
 }
 
+/* Floating copy button (detail page) */
+.copy-problem-btn {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 100;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px 8px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 500;
+  transition: color var(--transition), border-color var(--transition), transform var(--transition), box-shadow var(--transition);
+}
+
+.copy-problem-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+.copy-problem-btn .check-icon {
+  display: none;
+}
+
+.copy-problem-btn.copied {
+  color: var(--accent-green);
+  border-color: var(--accent-green);
+}
+
+.copy-problem-btn.copied .copy-icon {
+  display: none;
+}
+
+.copy-problem-btn.copied .check-icon {
+  display: block;
+}
+
 /* ============================================================
    Hero
    ============================================================ */
@@ -570,6 +615,8 @@ header {
   overflow-wrap: break-word;
   word-break: break-word;
 }
+
+
 
 /* Challenge body (rendered challenge.html) */
 .challenge-body {
