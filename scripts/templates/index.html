@@ -5,24 +5,124 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LeetGPU Challenges</title>
+  <script>
+    (function(){var t=localStorage.getItem('theme');if(t==='dark'||t==='light'){document.documentElement.dataset.theme=t}else if(window.matchMedia('(prefers-color-scheme:light)').matches){document.documentElement.dataset.theme='light'}})();
+  </script>
   <link rel="stylesheet" href="{{ root }}/assets/css/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script>
+    // Seed challenge data for filters (injected at build time)
+    window.__CARDS = [
+      {% for c in challenges -%}
+      { s: '{{ c.slug }}', d: '{{ c.difficulty }}', f: '{{ c.framework_attr }}', n: '{{ c.name|lower }}', u: '{{ c.number }}' },
+      {% endfor -%}
+    ];
+
+    document.addEventListener('alpine:init', () => {
+      Alpine.store('theme', {
+        current: (() => {
+          const stored = localStorage.getItem('theme');
+          if (stored === 'dark' || stored === 'light') return stored;
+          return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        })(),
+        init() {
+          document.documentElement.dataset.theme = this.current;
+        },
+        toggle() {
+          this.current = this.current === 'dark' ? 'light' : 'dark';
+          localStorage.setItem('theme', this.current);
+          document.documentElement.dataset.theme = this.current;
+        }
+      });
+
+      Alpine.store('filters', {
+        difficulty: 'all',
+        framework: 'all',
+        query: '',
+        visible: {},
+
+        init() {
+          for (const c of window.__CARDS) { this.visible[c.s] = true; }
+          const hash = window.location.hash.replace(/^#/, '');
+          const p = new URLSearchParams(hash);
+          if (p.has('difficulty')) this.difficulty = p.get('difficulty');
+          if (p.has('framework')) this.framework = p.get('framework');
+          if (p.has('q')) this.query = p.get('q');
+          this.recalc();
+        },
+
+        recalc() {
+          const q = this.query.toLowerCase().trim();
+          for (const c of window.__CARDS) {
+            const okD = this.difficulty === 'all' || c.d === this.difficulty;
+            const okF = this.framework === 'all' || (c.f || '').split(',').includes(this.framework);
+            const okQ = !q || c.n.includes(q) || c.u === q;
+            this.visible[c.s] = okD && okF && okQ;
+          }
+        },
+
+        syncHash() {
+          const parts = [];
+          if (this.difficulty !== 'all') parts.push('difficulty=' + this.difficulty);
+          if (this.framework !== 'all') parts.push('framework=' + this.framework);
+          if (this.query) parts.push('q=' + encodeURIComponent(this.query));
+          const h = parts.length ? '#' + parts.join('&') : '';
+          if (window.location.hash !== h) {
+            history.replaceState(null, '', h || window.location.pathname);
+          }
+        },
+
+        setDifficulty(d) { this.difficulty = d; this.recalc(); this.syncHash(); },
+        setFramework(f) { this.framework = f; this.recalc(); this.syncHash(); },
+
+        readHash() {
+          const hash = window.location.hash.replace(/^#/, '');
+          const p = new URLSearchParams(hash);
+          this.difficulty = p.get('difficulty') || 'all';
+          this.framework = p.get('framework') || 'all';
+          this.query = p.get('q') || '';
+          this.recalc();
+        },
+
+        visibleCount() {
+          let n = 0;
+          for (const k in this.visible) { if (this.visible[k]) n++; }
+          return n;
+        }
+      });
+
+      Alpine.store('filters').init();
+      window.addEventListener('popstate', () => Alpine.store('filters').readHash());
+    });
+  </script>
 </head>
 
-<body>
+<body x-data x-init="$store.theme.init()">
+
+  <!-- Geometric accents -->
+  <svg class="geo-accent geo-accent-top" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+    <path d="M100 20 L170 60 L170 140 L100 180 L30 140 L30 60 Z" fill="none" stroke="var(--accent)" stroke-width="0.5" opacity="0.3"/>
+    <circle cx="100" cy="100" r="60" fill="none" stroke="var(--accent-cyan)" stroke-width="0.3" opacity="0.2"/>
+    <path d="M40 100 L160 100 M100 40 L100 160" stroke="var(--accent-purple)" stroke-width="0.3" opacity="0.15"/>
+  </svg>
+  <svg class="geo-accent geo-accent-bottom" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+    <rect x="40" y="40" width="120" height="120" rx="20" fill="none" stroke="var(--accent)" stroke-width="0.5" opacity="0.25" transform="rotate(15 100 100)"/>
+    <circle cx="100" cy="100" r="45" fill="none" stroke="var(--accent-cyan)" stroke-width="0.3" opacity="0.18"/>
+  </svg>
 
   <header>
     <div class="header-inner">
       <a href="{{ root }}/" class="logo">LeetGPU <span class="logo-sub">Challenges</span></a>
-      <button id="theme-toggle" class="theme-btn" aria-label="Toggle theme">
-        <svg class="sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-          stroke-width="2">
-          <circle cx="12" cy="12" r="5" />
-          <path
-            d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+      <button id="theme-toggle" class="theme-btn" aria-label="Toggle theme" @click="$store.theme.toggle()">
+        <svg class="sun-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="5"/>
+          <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
         </svg>
-        <svg class="moon-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-          stroke-width="2">
-          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+        <svg class="moon-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
         </svg>
       </button>
     </div>
@@ -30,34 +130,53 @@
 
   <section class="hero">
     <h1>GPU Programming Challenges</h1>
-    <p class="hero-sub">{{ total }} hands-on GPU programming challenges — from vector addition to Flash Attention. Solve
-      in <strong>{{ all_frameworks|length }}</strong> frameworks and compare with reference solutions.</p>
+    <p class="hero-sub">{{ total }} hands-on GPU programming challenges — from vector addition to Flash Attention. Solve in <strong>{{ all_frameworks|length }}</strong> frameworks and compare with reference solutions.</p>
+    <div class="hero-stats">
+      <div class="hero-stat">
+        <div class="hero-stat-value">{{ total }}</div>
+        <div class="hero-stat-label">Challenges</div>
+      </div>
+      <div class="hero-stat">
+        <div class="hero-stat-value">{{ all_frameworks|length }}</div>
+        <div class="hero-stat-label">Frameworks</div>
+      </div>
+      <div class="hero-stat">
+        <div class="hero-stat-value">3</div>
+        <div class="hero-stat-label">Levels</div>
+      </div>
+    </div>
+    <div class="diff-bars">
+      <div class="diff-bar easy" style="width: {{ (counts.easy / total * 100)|round|int }}px"></div>
+      <div class="diff-bar medium" style="width: {{ (counts.medium / total * 100)|round|int }}px"></div>
+      <div class="diff-bar hard" style="width: {{ (counts.hard / total * 100)|round|int }}px"></div>
+    </div>
   </section>
 
   <section class="controls">
-    <div class="filter-row">
-      <div class="filter-tabs">
-        <button class="filter-tab active" data-filter="all">All <span class="count">({{ total }})</span></button>
-        <button class="filter-tab" data-filter="easy">Easy <span class="count">({{ counts.easy }})</span></button>
-        <button class="filter-tab" data-filter="medium">Medium <span class="count">({{ counts.medium }})</span></button>
-        <button class="filter-tab" data-filter="hard">Hard <span class="count">({{ counts.hard }})</span></button>
+    <div class="controls-inner">
+      <div class="filter-row">
+        <div class="filter-tabs" role="tablist" aria-label="Filter by difficulty">
+          <button class="filter-tab active" role="tab" :class="{ active: $store.filters.difficulty === 'all' }" @click="$store.filters.setDifficulty('all')">All <span class="count">({{ total }})</span></button>
+          <button class="filter-tab" role="tab" :class="{ active: $store.filters.difficulty === 'easy' }" @click="$store.filters.setDifficulty('easy')">Easy <span class="count">({{ counts.easy }})</span></button>
+          <button class="filter-tab" role="tab" :class="{ active: $store.filters.difficulty === 'medium' }" @click="$store.filters.setDifficulty('medium')">Medium <span class="count">({{ counts.medium }})</span></button>
+          <button class="filter-tab" role="tab" :class="{ active: $store.filters.difficulty === 'hard' }" @click="$store.filters.setDifficulty('hard')">Hard <span class="count">({{ counts.hard }})</span></button>
+        </div>
+        <div class="search-wrap">
+          <svg class="search-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+          </svg>
+          <input type="text" id="search" placeholder="Search by name or number…"
+                 :value="$store.filters.query"
+                 @input="$store.filters.query = $el.value; $store.filters.recalc(); $store.filters.syncHash()">
+        </div>
       </div>
-      <div class="search-wrap">
-        <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-          stroke-width="2">
-          <circle cx="11" cy="11" r="8" />
-          <path d="m21 21-4.35-4.35" />
-        </svg>
-        <input type="text" id="search" placeholder="Search by name or number&hellip;" />
-      </div>
-    </div>
-    <div class="filter-row">
-      <div class="framework-tabs">
-        <button class="framework-tab active" data-framework="all">All <span class="count">({{ total }})</span></button>
-        {% for fw in all_frameworks %}
-        <button class="framework-tab" data-framework="{{ fw }}">{{ fw }} <span class="count">({{ fw_counts[fw]
-            }})</span></button>
-        {% endfor %}
+      <div class="filter-row">
+        <div class="framework-tabs">
+          <button class="framework-tab active" :class="{ active: $store.filters.framework === 'all' }" @click="$store.filters.setFramework('all')">All <span class="count">({{ total }})</span></button>
+          {% for fw in all_frameworks %}
+          <button class="framework-tab" :class="{ active: $store.filters.framework === '{{ fw }}' }" @click="$store.filters.setFramework('{{ fw }}')">{{ fw }} <span class="count">({{ fw_counts[fw] }})</span></button>
+          {% endfor %}
+        </div>
       </div>
     </div>
   </section>
@@ -65,8 +184,14 @@
   <main class="challenge-grid" id="challenge-grid">
     {% for c in challenges %}
     <a href="{{ root }}/challenges/{{ c.difficulty }}/{{ c.slug }}/" class="challenge-card"
-      data-difficulty="{{ c.difficulty }}" data-name="{{ c.name|lower }}" data-number="{{ c.number }}"
-      data-frameworks="{{ c.framework_attr }}">
+       x-show="$store.filters.visible['{{ c.slug }}']"
+       x-transition:enter="transition ease-out duration-300"
+       x-transition:enter-start="opacity-0 scale-95"
+       x-transition:enter-end="opacity-100 scale-100"
+       x-transition:leave="transition ease-in duration-150"
+       x-transition:leave-start="opacity-100 scale-100"
+       x-transition:leave-end="opacity-0 scale-95"
+       style="animation-delay: {{ loop.index0 * 30 }}ms">
       <div class="card-top">
         <span class="card-num">#{{ c.number }}</span>
         <span class="badge {{ c.difficulty }}">{{ c.difficulty }}</span>
@@ -89,14 +214,16 @@
       </div>
     </a>
     {% endfor %}
-    <p class="empty-state" id="empty-state" hidden>No challenges match your filters.</p>
+    <div class="empty-state" x-show="$store.filters.visibleCount() === 0" x-cloak>
+      <span class="empty-state-icon">&#128269;</span>
+      No challenges match your filters.
+    </div>
   </main>
 
   <footer>
     <p><a href="https://leetgpu.com">leetgpu.com</a> &middot; MIT License</p>
   </footer>
 
-  <script src="{{ root }}/assets/js/main.js"></script>
 </body>
 
 </html>
