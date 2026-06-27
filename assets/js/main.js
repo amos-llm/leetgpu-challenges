@@ -218,6 +218,37 @@
   });
 
   /* ============================================================
+     Shared clipboard helper
+     ============================================================ */
+  function copyToClipboard(text, btn) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        btn.classList.add("copied");
+        setTimeout(function () {
+          btn.classList.remove("copied");
+        }, 2000);
+      });
+    } else {
+      var textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      textarea.style.top = "0";
+      textarea.style.left = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        document.execCommand("copy");
+        btn.classList.add("copied");
+        setTimeout(function () {
+          btn.classList.remove("copied");
+        }, 2000);
+      } catch (err) { }
+      document.body.removeChild(textarea);
+    }
+  }
+
+  /* ============================================================
      Copy code buttons
      ============================================================ */
   document.querySelectorAll(".copy-btn").forEach(function (btn) {
@@ -226,31 +257,37 @@
       if (!wrapper) return;
       var code = wrapper.querySelector("code");
       if (!code) return;
-
-      var text = code.textContent;
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(function () {
-          btn.classList.add("copied");
-          setTimeout(function () {
-            btn.classList.remove("copied");
-          }, 2000);
-        });
-      } else {
-        var textarea = document.createElement("textarea");
-        textarea.value = text;
-        textarea.style.position = "fixed";
-        textarea.style.opacity = "0";
-        document.body.appendChild(textarea);
-        textarea.select();
-        try {
-          document.execCommand("copy");
-          btn.classList.add("copied");
-          setTimeout(function () {
-            btn.classList.remove("copied");
-          }, 2000);
-        } catch (err) { }
-        document.body.removeChild(textarea);
-      }
+      copyToClipboard(code.textContent, btn);
     });
   });
+
+  /* ============================================================
+     Copy Problem button (floating)
+     ============================================================ */
+  (function injectCopyProblemBtn() {
+    var body = document.querySelector(".challenge-body");
+    if (!body) return;
+
+    var btn = document.createElement("button");
+    btn.className = "copy-problem-btn";
+    btn.setAttribute("aria-label", "Copy problem");
+    btn.title = "Copy problem";
+    btn.innerHTML =
+      '<svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+      '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>' +
+      '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>' +
+      '</svg>' +
+      '<svg class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+      '<polyline points="20 6 9 17 4 12"></polyline>' +
+      '</svg>' +
+      '<span>Copy</span>';
+
+    document.body.appendChild(btn);
+
+    btn.addEventListener("click", function () {
+      var text = body.textContent.trim();
+      if (!text) return;
+      copyToClipboard(text, btn);
+    });
+  })();
 })();
