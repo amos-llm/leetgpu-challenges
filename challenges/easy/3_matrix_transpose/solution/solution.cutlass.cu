@@ -62,6 +62,19 @@ extern "C" void solve(const float* input, float* output, int rows, int cols) {
     dim3 grid_dim(size<1>(tiled_S), size<2>(tiled_S));
     dim3 block_dim(size(thr_layout));
 
+    // 32-way bank conflict: 32 cols x 32 banks, same column in adjacent rows hits same bank
+    // auto smem_S_layout = make_layout(cta_tiler, GenRowMajor{});
+    // auto smem_D_layout = make_layout(cta_tiler, GenColMajor{});
+
+    // Padding: logical shape stays (32,32), physical stride 33 breaks bank alignment
+    // smem_S(r,c) = addr r*33 + c, smem_D(r,c) = addr r + c*33, both alias correctly
+    // auto smem_S_layout = make_layout(cta_tiler, make_stride(Int<33>{}, Int<1>{}));
+    // auto smem_D_layout = make_layout(cta_tiler, make_stride(Int<1>{}, Int<33>{}));
+
+    // Swizzle<B=5, M=0, S=5>: XOR bit[0:4] ^ bit[5:9] -> bank = (c ^ r) % 32
+    //   B=5: 32 banks = 2^5 bank select bits
+    //   M=0: bank info starts at bit 0 (logical offset bit 0 = column LSB)
+    //   S=5: row stride = 32 = 2^5, row info starts at bit 5
     auto swizzle = Swizzle<5, 0, 5>{};
     auto smem_S_layout = composition(swizzle, make_layout(cta_tiler, GenRowMajor{}));
     auto smem_D_layout = composition(swizzle, make_layout(cta_tiler, GenColMajor{}));
