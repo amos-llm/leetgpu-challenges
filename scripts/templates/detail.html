@@ -5,44 +5,126 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ c.name }} - LeetGPU Challenges</title>
+  <script>
+    (function(){var t=localStorage.getItem('theme');if(t==='dark'||t==='light'){document.documentElement.dataset.theme=t}else if(window.matchMedia('(prefers-color-scheme:light)').matches){document.documentElement.dataset.theme='light'}})();
+  </script>
   <link rel="stylesheet" href="{{ root }}/assets/css/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link id="prism-dark" rel="stylesheet" media="all"
     href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
   <link id="prism-light" rel="stylesheet" media="none"
     href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css">
   <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script>
+    document.addEventListener('alpine:init', () => {
+      Alpine.store('theme', {
+        current: (() => {
+          const stored = localStorage.getItem('theme');
+          if (stored === 'dark' || stored === 'light') return stored;
+          return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        })(),
+        init() {
+          document.documentElement.dataset.theme = this.current;
+          this.syncPrism();
+        },
+        toggle() {
+          this.current = this.current === 'dark' ? 'light' : 'dark';
+          localStorage.setItem('theme', this.current);
+          document.documentElement.dataset.theme = this.current;
+          this.syncPrism();
+        },
+        syncPrism() {
+          const dark = document.getElementById('prism-dark');
+          const light = document.getElementById('prism-light');
+          if (dark) dark.media = this.current === 'dark' ? 'all' : 'none';
+          if (light) light.media = this.current === 'dark' ? 'none' : 'all';
+        }
+      });
+
+      Alpine.data('codeTabs', () => {
+        {% set starter_default = 'starter-0' if c.starter_files else '' %}
+        {% set solution_default = 'solution-0' if c.solution_files else '' %}
+        return {
+          activeStarter: '{{ starter_default }}',
+          activeSolution: '{{ solution_default }}',
+
+          init() {
+            const hash = window.location.hash.replace(/^#/, '');
+            if (hash.startsWith('starter-')) this.activeStarter = hash;
+            if (hash.startsWith('solution-')) this.activeSolution = hash;
+            window.addEventListener('popstate', () => {
+              const h = window.location.hash.replace(/^#/, '');
+              if (h.startsWith('starter-')) this.activeStarter = h;
+              if (h.startsWith('solution-')) this.activeSolution = h;
+            });
+          },
+
+          setTab(group, tabId) {
+            if (group === 'starter') this.activeStarter = tabId;
+            else this.activeSolution = tabId;
+            history.replaceState(null, '', '#' + tabId);
+            this.$nextTick(() => {
+              const panel = document.querySelector('[data-panel="' + tabId + '"]');
+              if (panel && typeof Prism !== 'undefined') {
+                const code = panel.querySelector('code[class*="language-"]');
+                if (code && !code.classList.contains('prism-highlighted')) {
+                  Prism.highlightElement(code);
+                  code.classList.add('prism-highlighted');
+                }
+              }
+            });
+          },
+
+          isActive(group, tabId) {
+            return group === 'starter' ? this.activeStarter === tabId : this.activeSolution === tabId;
+          }
+        };
+      });
+    });
+  </script>
 </head>
 
-<body>
+<body x-data x-init="$store.theme.init()">
+
+  <!-- Geometric accents -->
+  <svg class="geo-accent geo-accent-top" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+    <path d="M100 20 L170 60 L170 140 L100 180 L30 140 L30 60 Z" fill="none" stroke="var(--accent)" stroke-width="0.5" opacity="0.3"/>
+    <circle cx="100" cy="100" r="60" fill="none" stroke="var(--accent-cyan)" stroke-width="0.3" opacity="0.2"/>
+  </svg>
+  <svg class="geo-accent geo-accent-bottom" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+    <rect x="40" y="40" width="120" height="120" rx="20" fill="none" stroke="var(--accent)" stroke-width="0.5" opacity="0.25" transform="rotate(15 100 100)"/>
+    <circle cx="100" cy="100" r="45" fill="none" stroke="var(--accent-cyan)" stroke-width="0.3" opacity="0.18"/>
+  </svg>
 
   <header>
     <div class="header-inner">
       <div class="header-left">
         <a href="{{ root }}/" class="logo">LeetGPU <span class="logo-sub">Challenges</span></a>
         <nav class="breadcrumb">
-          <a href="{{ root }}/?difficulty={{ c.difficulty }}">{{ c.difficulty }}</a>
+          <a href="{{ root }}/#difficulty={{ c.difficulty }}">{{ c.difficulty }}</a>
           <span class="sep">/</span>
           <span>{{ c.slug }}</span>
         </nav>
       </div>
-      <button id="theme-toggle" class="theme-btn" aria-label="Toggle theme">
-        <svg class="sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-          stroke-width="2">
-          <circle cx="12" cy="12" r="5" />
-          <path
-            d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+      <button id="theme-toggle" class="theme-btn" aria-label="Toggle theme" @click="$store.theme.toggle()">
+        <svg class="sun-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="5"/>
+          <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
         </svg>
-        <svg class="moon-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-          stroke-width="2">
-          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+        <svg class="moon-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
         </svg>
       </button>
     </div>
   </header>
 
-  <article class="detail-layout">
+  <article class="detail-layout" x-data="codeTabs" x-init="init()">
     <div class="detail-main">
       <div class="title-bar">
+        <span class="card-num">#{{ c.number }}</span>
         <h1>{{ c.name }}</h1>
         <span class="badge {{ c.difficulty }}">{{ c.difficulty }}</span>
       </div>
@@ -68,26 +150,26 @@
           <section class="code-section">
             <h2 class="code-section-title">Starter Templates</h2>
             <p class="code-section-desc">Empty templates to start your own solution.</p>
-            <div class="code-tabs" data-group="starter">
+            <div class="code-tabs">
               <nav class="tab-nav">
                 {% for f in c.starter_files %}
-                <button class="tab-btn {% if loop.first %}active{% endif %}" data-tab="starter-{{ loop.index0 }}"
-                  data-hash="starter-{{ f.name | lower }}">{{
-                  f.name
-                  }}</button>
+                <button class="tab-btn {% if loop.first %}active{% endif %}"
+                        :class="{ active: isActive('starter', 'starter-{{ loop.index0 }}') }"
+                        @click="setTab('starter', 'starter-{{ loop.index0 }}')">{{ f.name }}</button>
                 {% endfor %}
               </nav>
               {% for f in c.starter_files %}
-              <div class="tab-panel {% if loop.first %}active{% endif %}" data-panel="starter-{{ loop.index0 }}">
+              <div class="tab-panel" :class="{ active: isActive('starter', 'starter-{{ loop.index0 }}') }" data-panel="starter-{{ loop.index0 }}">
                 <div class="code-block-wrapper">
-                  <button class="copy-btn" aria-label="Copy code">
-                    <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                      stroke-width="2">
+                  <button class="copy-btn" aria-label="Copy code"
+                          x-data="{ copied: false }"
+                          @click="navigator.clipboard.writeText($el.parentElement.querySelector('code').textContent).then(() => { copied = true; setTimeout(() => copied = false, 2000) })"
+                          :class="copied ? 'copied' : ''">
+                    <svg x-show="!copied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
                       <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
                     </svg>
-                    <svg class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                      stroke-width="2">
+                    <svg x-show="copied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <polyline points="20 6 9 17 4 12"></polyline>
                     </svg>
                   </button>
@@ -103,26 +185,26 @@
           <section class="code-section">
             <h2 class="code-section-title">Reference Solutions</h2>
             <p class="code-section-desc">Complete reference implementations.</p>
-            <div class="code-tabs" data-group="solution">
+            <div class="code-tabs">
               <nav class="tab-nav">
                 {% for f in c.solution_files %}
-                <button class="tab-btn {% if loop.first %}active{% endif %}" data-tab="solution-{{ loop.index0 }}"
-                  data-hash="solution-{{ f.name | lower }}">{{
-                  f.name
-                  }}</button>
+                <button class="tab-btn {% if loop.first %}active{% endif %}"
+                        :class="{ active: isActive('solution', 'solution-{{ loop.index0 }}') }"
+                        @click="setTab('solution', 'solution-{{ loop.index0 }}')">{{ f.name }}</button>
                 {% endfor %}
               </nav>
               {% for f in c.solution_files %}
-              <div class="tab-panel {% if loop.first %}active{% endif %}" data-panel="solution-{{ loop.index0 }}">
+              <div class="tab-panel" :class="{ active: isActive('solution', 'solution-{{ loop.index0 }}') }" data-panel="solution-{{ loop.index0 }}">
                 <div class="code-block-wrapper">
-                  <button class="copy-btn" aria-label="Copy code">
-                    <svg class="copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                      stroke-width="2">
+                  <button class="copy-btn" aria-label="Copy code"
+                          x-data="{ copied: false }"
+                          @click="navigator.clipboard.writeText($el.parentElement.querySelector('code').textContent).then(() => { copied = true; setTimeout(() => copied = false, 2000) })"
+                          :class="copied ? 'copied' : ''">
+                    <svg x-show="!copied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
                       <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
                     </svg>
-                    <svg class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                      stroke-width="2">
+                    <svg x-show="copied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <polyline points="20 6 9 17 4 12"></polyline>
                     </svg>
                   </button>
@@ -154,15 +236,30 @@
         <span></span>
         {% endif %}
       </nav>
-	    </div>
+    </div>
 
   </article>
+
+  <!-- Floating copy problem button -->
+  <button class="copy-problem-btn" aria-label="Copy problem" title="Copy problem"
+          x-data="{ copied: false, body: null }"
+          x-init="body = document.querySelector('.challenge-body')"
+          @click="if (body) { const t = body.textContent.trim(); if (t) { navigator.clipboard.writeText(t).then(() => { copied = true; setTimeout(() => copied = false, 2000) }); } }"
+          :class="copied ? 'copied' : ''">
+    <svg x-show="!copied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+    </svg>
+    <svg x-show="copied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <polyline points="20 6 9 17 4 12"></polyline>
+    </svg>
+    <span>Copy</span>
+  </button>
 
   <footer>
     <p><a href="https://leetgpu.com">leetgpu.com</a> &middot; MIT License</p>
   </footer>
 
-  <script src="{{ root }}/assets/js/main.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
   <script>
