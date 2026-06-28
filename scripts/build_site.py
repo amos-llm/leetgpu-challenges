@@ -4,6 +4,7 @@
 import ast
 import re
 import shutil
+import textwrap
 from pathlib import Path
 
 from jinja2 import Template
@@ -40,6 +41,67 @@ def extract_metadata(challenge_py: Path) -> dict:
                             if isinstance(item.value, ast.Constant):
                                 meta[target.id] = item.value.value
     return meta
+
+
+def _collect_self_calls(node: ast.AST) -> set[str]:
+    """Find all method names called via self.<name>() in an AST node."""
+    names: set[str] = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute):
+            if isinstance(child.func.value, ast.Name) and child.func.value.id == "self":
+                names.add(child.func.attr)
+    return names
+
+
+def extract_reference_impl(challenge_py: Path) -> str | None:
+    """Extract the reference_impl method and its helper methods from challenge.py."""
+    with open(challenge_py) as f:
+        source = f.read()
+        lines = source.splitlines(keepends=True)
+
+    tree = ast.parse(source)
+
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.ClassDef) and node.name == "Challenge"):
+            continue
+
+        # Collect all method definitions
+        methods: dict[str, ast.FunctionDef] = {}
+        for item in node.body:
+            if isinstance(item, ast.FunctionDef):
+                methods[item.name] = item
+
+        if "reference_impl" not in methods:
+            return None
+
+        # Transitively find all helpers called via self.<method>()
+        needed: set[str] = set()
+        queue = ["reference_impl"]
+        while queue:
+            name = queue.pop()
+            if name in needed or name not in methods:
+                continue
+            needed.add(name)
+            queue.extend(_collect_self_calls(methods[name]) - needed)
+
+        # Extract source for each method (dependency order: helpers first)
+        parts: list[str] = []
+        for name in sorted(needed - {"reference_impl"}):
+            m = methods[name]
+            raw = "".join(lines[m.lineno - 1 : m.end_lineno])
+            parts.append(textwrap.dedent(raw))
+
+        # reference_impl last
+        m = methods["reference_impl"]
+        raw = "".join(lines[m.lineno - 1 : m.end_lineno])
+        parts.append(textwrap.dedent(raw))
+
+        body = "\n\n".join(parts)
+        # Re-indent under a class wrapper so 'self' makes sense
+        body = textwrap.indent(body, "    ")
+        return f"class Challenge:\n{body}"
+
+    return None
 
 
 def get_number_from_dirname(name: str) -> int:
@@ -157,6 +219,7 @@ def extract_challenges() -> list[dict]:
 
             meta["snippet"] = extract_snippet(html_content)
 
+            meta["reference_impl"] = extract_reference_impl(challenge_py)
             meta["solution_files"] = get_framework_files(entry / "solution")
             meta["starter_files"] = get_framework_files(entry / "starter")
 
