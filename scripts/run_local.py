@@ -475,6 +475,47 @@ def _clone_case(case: Dict[str, Any]) -> Dict[str, Any]:
     return {k: _fast_clone_value(v) for k, v in case.items()}
 
 
+def _materialize_case(case: Dict[str, Any], device: str = "cuda") -> Dict[str, Any]:
+    """Convert RandnTensor / OutTensor / etc. placeholders into real torch tensors."""
+    if not _TORCH_AVAILABLE:
+        return case
+
+    _dtype_map = {
+        "float32": torch.float32,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "int32": torch.int32,
+        "int64": torch.int64,
+    }
+
+    def _resolve_dtype(dtype_str):
+        if hasattr(dtype_str, "dtype") and not isinstance(dtype_str, str):
+            return dtype_str
+        return _dtype_map.get(dtype_str, torch.float32)
+
+    result = {}
+    for k, v in case.items():
+        cls_name = v.__class__.__name__ if hasattr(v, "__class__") else ""
+        if cls_name == "RandnTensor":
+            dt = _resolve_dtype(v.dtype)
+            result[k] = torch.normal(v.mean, v.std, v.shape, device=device, dtype=dt)
+        elif cls_name == "RandTensor":
+            dt = _resolve_dtype(v.dtype)
+            result[k] = torch.empty(v.shape, device=device, dtype=dt).uniform_(v.low, v.high)
+        elif cls_name == "FullTensor":
+            dt = _resolve_dtype(v.dtype)
+            result[k] = torch.full(v.shape, v.value, device=device, dtype=dt)
+        elif cls_name == "RandIntTensor":
+            dt = _resolve_dtype(v.dtype)
+            result[k] = torch.randint(v.low, v.high, v.shape, device=device, dtype=dt)
+        elif cls_name == "OutTensor":
+            dt = _resolve_dtype(v.dtype)
+            result[k] = torch.empty(v.shape, device=device, dtype=dt)
+        else:
+            result[k] = v
+    return result
+
+
 def _run_with_warmup_and_measure(
     callable_func: Callable[[Dict[str, Any]], Any],
     test_case: Dict[str, Any],
@@ -875,7 +916,8 @@ def run_single_challenge(
 
         for i, test_case in enumerate(tests):
 
-            # prepare isolated copies for reference and solution
+            # materialise placeholder tensors (RandnTensor, OutTensor, etc.) then clone
+            test_case = _materialize_case(test_case, getattr(inst, "device", "cuda"))
             ref_case = _clone_case(test_case)
             solution_case = _clone_case(test_case)
 
