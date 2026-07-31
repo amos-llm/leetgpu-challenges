@@ -18,11 +18,8 @@ __global__ void matrix_add_vectorized(const float* A, const float* B, float* C, 
         c4[vec_idx] = c;
     } else {
         int tail_idx = vec_idx * 4;
-#pragma unroll
-        for (int i = 0; i < 4; ++i) {
-            if (tail_idx + i < total_elements) {
-                C[tail_idx + i] = A[tail_idx + i] + B[tail_idx + i];
-            }
+        for (int i = 0; tail_idx + i < total_elements; ++i) {
+            C[tail_idx + i] = A[tail_idx + i] + B[tail_idx + i];
         }
     }
 }
