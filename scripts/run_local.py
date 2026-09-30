@@ -175,11 +175,16 @@ def normalize_tests(challenge: Any, test_kind: str) -> List[Dict[str, Any]]:
     raise ValueError(f"Unknown test kind: {test_kind}")
 
 
-def map_params_to_signature(func, case_insensitive_params: Dict[str, Any]) -> List[Any]:
-    """Return ordered args for func by matching its parameter names case-insensitively."""
+def _signature_of(func: Callable) -> inspect.Signature:
+    """``inspect.signature`` with a cache (not cheap for DSL-wrapped callables)."""
     if func not in _signature_cache:
         _signature_cache[func] = inspect.signature(func)
-    sig = _signature_cache[func]
+    return _signature_cache[func]
+
+
+def map_params_to_signature(func, case_insensitive_params: Dict[str, Any]) -> List[Any]:
+    """Return ordered args for func by matching its parameter names case-insensitively."""
+    sig = _signature_of(func)
     lower_map = {k.lower(): v for k, v in case_insensitive_params.items()}
     args: List[Any] = []
     for pname in sig.parameters:
@@ -207,6 +212,112 @@ def _jax_to_torch(x):
     return x
 
 
+def _cute_assumed_align(v: Any) -> Optional[int]:
+    """Largest power-of-two byte alignment that ``v``'s data pointer actually satisfies.
+
+    CuTeDSL derives a pointer's ``align<N>`` type attribute from the ``assumed_align``
+    argument of ``from_dlpack`` and defaults to the element size, because DLPack does not
+    carry alignment information. That default caps cute solutions at scalar (<= 32 bit)
+    copies even though CUDA allocations are 256B+ aligned. Deriving the value from the
+    pointer itself keeps the declaration truthful for views and slices too.
+    """
+    try:
+        ptr = int(v.data_ptr())
+        elem_size = int(v.element_size())
+    except Exception:
+        return None
+    if ptr <= 0:
+        return None
+    align = min(ptr & -ptr, 128)  # largest power of two dividing ptr, capped
+    return align if align >= elem_size else None
+
+
+def _to_cute_tensor(v: Any):
+    """Convert a torch tensor to a CuTeDSL tensor declaring its real pointer alignment.
+
+    Cached by (pointer, shape, dtype, strides) so the repeated timed calls of one test
+    case do not pay the conversion again.
+    """
+    from cutlass.cute.runtime import from_dlpack
+
+    try:
+        key = (int(v.data_ptr()), tuple(v.shape), str(v.dtype), tuple(v.stride()))
+    except Exception:
+        key = None
+    if key is not None and key in _cute_tensor_cache:
+        return _cute_tensor_cache[key]
+
+    align = _cute_assumed_align(v)
+    tensor = None
+    if align is not None:
+        try:
+            tensor = from_dlpack(v, assumed_align=align)
+        except Exception:
+            tensor = None
+    if tensor is None:
+        tensor = from_dlpack(v)
+    if key is not None:
+        _cute_tensor_cache[key] = tensor
+    return tensor
+
+
+_cute_tensor_cache: Dict[Any, Any] = {}
+_cute_compiled_cache: Dict[Any, Any] = {}
+_cute_warned: set = set()
+
+
+_cute_plan: Optional[Tuple[Any, ...]] = None
+
+
+def _cute_plan_lookup(case: Dict[str, Any]):
+    """Return the prepared call plan for ``case`` while it is still the current one.
+
+    The grading backend prepares (converts + compiles) the arguments once per test case
+    (``prepare_timed_call``) and the timed loop only calls the compiled entry.
+    """
+    return _cute_plan if _cute_plan is not None and _cute_plan[0] is case else None
+
+
+def _cute_plan_store(
+    case: Dict[str, Any], args: Tuple[Any, ...], call: Any, outs: Dict[str, Any]
+) -> None:
+    global _cute_plan
+    _cute_plan = (case, args, call, outs)
+
+
+def _cute_call_key(args: Tuple[Any, ...]) -> Tuple[Any, ...]:
+    """Signature identifying one cute test case (tensor shapes/dtypes + scalars)."""
+    key: List[Any] = []
+    for a in args:
+        if hasattr(a, "shape") and hasattr(a, "element_type"):
+            key.append((str(a.element_type), tuple(int(s) for s in a.shape)))
+        else:
+            key.append(a)
+    return tuple(key)
+
+
+def _cute_timed_entry(solve: Any, args: Tuple[Any, ...]) -> Any:
+    """Compile the ``@cute.jit`` entry once and return a cheap callable for it.
+
+    The grading backend compiles the entry point before timing it
+    (``prepare_timed_call``) and then times the compiled callable. Calling the entry
+    point directly re-runs its host-side body (layout construction, grid math) on every
+    invocation, which hides the kernel time. The compiled wrapper returns a status code,
+    so its return value is dropped here.
+    """
+    key = (id(solve), _cute_call_key(args))
+    if key not in _cute_compiled_cache:
+        from cutlass import cute
+
+        compiled = cute.compile(solve, *args)
+
+        def _run(*call_args: Any) -> None:
+            compiled(*call_args)
+
+        _cute_compiled_cache[key] = _run
+    return _cute_compiled_cache[key]
+
+
 def run_python_solution(
     solution_path: Path | types.ModuleType,
     framework: str,
@@ -223,6 +334,12 @@ def run_python_solution(
         raise AttributeError("solution module has no `solve` function")
     solve = mod.solve
 
+    if framework == "cute":
+        plan = _cute_plan_lookup(test_case)
+        if plan is not None:
+            plan[2](*plan[1])
+            return dict(plan[3]), None
+
     # Prepare case-insensitive mapping of params
     params = test_case
 
@@ -238,12 +355,10 @@ def run_python_solution(
     cute_tensor_map = {}
     if framework == "cute":
         try:
-            from cutlass.cute.runtime import from_dlpack
-
             new_params = {}
             for k, v in params.items():
                 if hasattr(v, "dtype") and str(v.device).startswith("cuda"):
-                    cute_v = from_dlpack(v)
+                    cute_v = _to_cute_tensor(v)
                     new_params[k] = cute_v
                     cute_tensor_map[id(cute_v)] = v
                 else:
@@ -254,7 +369,20 @@ def run_python_solution(
 
     # Call solve with matched signature order
     ordered_args = map_params_to_signature(solve, params)
-    ret = solve(*ordered_args)
+
+    # Mirror the grading backend, which compiles the @cute.jit entry before timing it.
+    call = solve
+    if framework == "cute":
+        if hasattr(solve, "_dsl_cls"):
+            call = _cute_timed_entry(solve, tuple(ordered_args))
+        elif id(solve) not in _cute_warned:
+            _cute_warned.add(id(solve))
+            logger.warning(
+                "cute entry point is not decorated with @cute.jit; the grading backend "
+                "compiles the entry point itself and will reject this solution."
+            )
+
+    ret = call(*ordered_args)
 
     # Determine output(s): use challenge.get_solve_signature() if available
     out_keys: List[str] = []
@@ -273,7 +401,7 @@ def run_python_solution(
 
     # take the argument object(s) corresponding to out_keys (incl. inout)
     if out_keys:
-        sig = inspect.signature(solve)
+        sig = _signature_of(solve)
         param_names = list(sig.parameters.keys())
         name_to_idx = {pn.lower(): i for i, pn in enumerate(param_names)}
         for ok in out_keys:
@@ -292,6 +420,9 @@ def run_python_solution(
         for k, v in list(result.items()):
             if id(v) in cute_tensor_map:
                 result[k] = cute_tensor_map[id(v)]
+
+    if framework == "cute" and hasattr(solve, "_dsl_cls"):
+        _cute_plan_store(test_case, tuple(ordered_args), call, dict(result))
 
     return result, ret
 
@@ -524,16 +655,18 @@ def _run_with_warmup_and_measure(
 ) -> Tuple[List[float], Any]:
     measured = None
     times: List[float] = []
+    # The grading backend prepares the arguments once (prepare_timed_call) and reuses them
+    # for every timed call, so clone a pristine case once instead of once per iteration.
+    prepared = _clone_case(test_case)
+    runs = max(1, repeat)
     # warmup
     for _ in range(warmup):
-        tmp = _clone_case(test_case)
-        callable_func(tmp)
+        callable_func(prepared)
         _sync_gpu()
-    # measured runs
-    for _ in range(max(1, repeat)):
-        tmp = _clone_case(test_case)
+    # measured runs: host call + sync, which is what the grading backend measures
+    for _ in range(runs):
         t0 = time.perf_counter()
-        out = callable_func(tmp)
+        out = callable_func(prepared)
         _sync_gpu()
         elapsed = time.perf_counter() - t0
         times.append(elapsed)
@@ -921,7 +1054,10 @@ def run_single_challenge(
             ref_case = _clone_case(test_case)
             solution_case = _clone_case(test_case)
 
-            # Compute expected (measure time). Apply warmup iterations if requested.
+            # First-call effects (torch dispatch warm-up, CuTeDSL tracing, allocator growth)
+            # would otherwise be charged to the measurement and the two columns would be
+            # warmed differently. The grading backend prepares/warms before timing, so run at
+            # least one untimed iteration for both the reference and the solution.
             try:
 
                 def _ref_call(tmp: Dict[str, Any]) -> Dict[str, Any]:
@@ -929,7 +1065,7 @@ def run_single_challenge(
                     return tmp
 
                 ref_local_times, measured_ref_case = _run_with_warmup_and_measure(
-                    _ref_call, test_case, warmup, repeat
+                    _ref_call, test_case, max(warmup, 1), repeat
                 )
                 ref_times.extend(ref_local_times)
                 ref_case = (
@@ -999,7 +1135,7 @@ def run_single_challenge(
                     runner_callable = _python_runner
 
                 solution_local_times, measured_outs = _run_with_warmup_and_measure(
-                    runner_callable, test_case, warmup, repeat
+                    runner_callable, test_case, max(warmup, 1), repeat
                 )
                 solution_times.extend(solution_local_times)
                 outs = measured_outs
