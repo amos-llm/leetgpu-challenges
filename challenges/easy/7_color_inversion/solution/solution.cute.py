@@ -51,20 +51,18 @@ def invert_kernel(
 @cute.jit
 def solve(image: cute.Tensor, width: cute.Int32, height: cute.Int32):
     N = width * height * 4
-    m_image = cute.make_tensor(image.iterator, cute.make_layout((N,), stride=(1,)))
-
-    dtype = m_image.element_type
+    dtype = image.element_type
     vector_size = 128 // dtype.width
 
     thr_layout = cute.make_layout((128,))
     val_layout = cute.make_layout((vector_size,))
     tiler, tv_layout = cute.make_layout_tv(thr_layout, val_layout)
 
-    g_image = cute.zipped_divide(m_image, tiler)
-    id_image = cute.make_identity_tensor(m_image.shape)
+    g_image = cute.zipped_divide(image, tiler)
+    id_image = cute.make_identity_tensor(image.shape)
     c_image = cute.zipped_divide(id_image, tiler=tiler)
 
-    invert_kernel(g_image, c_image, thr_layout, val_layout, m_image.shape, N).launch(
+    invert_kernel(g_image, c_image, thr_layout, val_layout, image.shape, N).launch(
         grid=[cute.size(g_image, mode=[1]), 1, 1],
         block=[cute.size(tv_layout, mode=[0]), 1, 1],
     )

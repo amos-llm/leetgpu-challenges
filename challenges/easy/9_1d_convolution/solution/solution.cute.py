@@ -3,9 +3,9 @@ import cutlass.cute as cute
 
 @cute.kernel
 def conv1d_kernel(
-    g_input: cute.Tensor,
-    g_kernel: cute.Tensor,
-    g_output: cute.Tensor,
+    input: cute.Tensor,
+    kernel: cute.Tensor,
+    output: cute.Tensor,
     input_size: cute.Int32,
     kernel_size: cute.Int32,
 ):
@@ -18,8 +18,8 @@ def conv1d_kernel(
     if idx < output_size:
         accum = 0.0
         for i in range(kernel_size):
-            accum += g_input[idx + i] * g_kernel[i]
-        g_output[idx] = accum
+            accum += input[idx + i] * kernel[i]
+        output[idx] = accum
 
 
 # input, kernel, output are tensors on the GPU
@@ -33,24 +33,11 @@ def solve(
 ):
     output_size = input_size - kernel_size + 1
 
-    m_input = cute.make_tensor(
-        input.iterator,
-        cute.make_layout((input_size,), stride=(1,)),
-    )
-    m_kernel = cute.make_tensor(
-        kernel.iterator,
-        cute.make_layout((kernel_size,), stride=(1,)),
-    )
-    m_output = cute.make_tensor(
-        output.iterator,
-        cute.make_layout((output_size,), stride=(1,)),
-    )
-
     threads_per_block = 256
     conv1d_kernel(
-        m_input,
-        m_kernel,
-        m_output,
+        input,
+        kernel,
+        output,
         input_size,
         kernel_size,
     ).launch(

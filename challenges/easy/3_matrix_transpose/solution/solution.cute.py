@@ -103,14 +103,6 @@ def solve(
     rows: cute.Int32,
     cols: cute.Int32,
 ):
-    input = cute.make_tensor(
-        input.iterator,
-        cute.make_layout((rows, cols), stride=(cols, 1)),
-    )
-    output = cute.make_tensor(
-        output.iterator,
-        cute.make_layout((cols, rows), stride=(rows, 1)),
-    )
     transpose_kernel(input, output, rows, cols).launch(
         grid=[
             (cols + TILE_SIZE - 1) // TILE_SIZE,
