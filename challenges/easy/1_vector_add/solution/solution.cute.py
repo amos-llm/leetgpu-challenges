@@ -54,23 +54,19 @@ def vector_add_kernel(
 # A, B, C are tensors on the GPU
 @cute.jit
 def solve(A: cute.Tensor, B: cute.Tensor, C: cute.Tensor, N: cute.Uint32):
-    m_a = cute.make_tensor(A.iterator, cute.make_layout((N,), stride=(1,)))
-    m_b = cute.make_tensor(B.iterator, cute.make_layout((N,), stride=(1,)))
-    m_c = cute.make_tensor(C.iterator, cute.make_layout((N,), stride=(1,)))
-
-    dtype = m_a.element_type
+    dtype = A.element_type
     vector_size = 128 // dtype.width
 
     thr_layout = cute.make_layout((128,))
     val_layout = cute.make_layout((vector_size,))
     tiler, tv_layout = cute.make_layout_tv(thr_layout, val_layout)
 
-    g_a = cute.zipped_divide(m_a, tiler)
-    g_b = cute.zipped_divide(m_b, tiler)
-    g_c = cute.zipped_divide(m_c, tiler)
-    id_c = cute.make_identity_tensor(m_c.shape)
+    g_a = cute.zipped_divide(A, tiler)
+    g_b = cute.zipped_divide(B, tiler)
+    g_c = cute.zipped_divide(C, tiler)
+    id_c = cute.make_identity_tensor(C.shape)
     c_c = cute.zipped_divide(id_c, tiler=tiler)
-    vector_add_kernel(g_a, g_b, g_c, c_c, m_c.shape, thr_layout, val_layout, N).launch(
+    vector_add_kernel(g_a, g_b, g_c, c_c, C.shape, thr_layout, val_layout, N).launch(
         grid=[cute.size(g_c, mode=[1]), 1, 1],
         block=[cute.size(tv_layout, mode=[0]), 1, 1],
     )
