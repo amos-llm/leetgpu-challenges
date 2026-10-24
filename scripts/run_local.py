@@ -789,6 +789,8 @@ def _output_depends_on_buffer(
     case: Dict[str, Any],
     outputs: Dict[str, Any],
     out_keys: List[str],
+    atol: float,
+    rtol: float,
 ) -> bool:
     """True if calling solve() again on the same buffers changes the outputs.
 
@@ -797,6 +799,11 @@ def _output_depends_on_buffer(
     right answer by luck. Re-running on the already-written buffers makes that dependence
     deterministic instead of flaky. Only meaningful for challenges with a dedicated ``out``
     buffer; see _has_separate_output().
+
+    Compared with the challenge tolerance rather than exact equality: a kernel that
+    accumulates into the existing contents is off by a whole factor, while a legitimately
+    order-dependent float reduction (atomicAdd block sums arriving in a different order)
+    only moves the last bits between runs.
     """
     before = {key: _clone_value(outputs[key]) for key in out_keys if key in outputs}
     if not before:
@@ -806,7 +813,7 @@ def _output_depends_on_buffer(
     except Exception:
         return False
     return any(
-        not outputs_match(value, outputs.get(key), 0.0, 0.0) for key, value in before.items()
+        not outputs_match(value, outputs.get(key), atol, rtol) for key, value in before.items()
     )
 
 
@@ -887,7 +894,7 @@ def _run_framework(
 
         # Checked last: it re-runs the solution, which mutates solution_case in place.
         if has_separate_output and _output_depends_on_buffer(
-            runner, solution_case, actual, out_keys
+            runner, solution_case, actual, out_keys, challenge.atol, challenge.rtol
         ):
             logger.warning(
                 "%s: output changes when solve() is called twice on the same buffers; the "
