@@ -48,6 +48,7 @@ extern "C" void solve(const float* logits, const int* true_labels, float* loss, 
     constexpr int kBlockSize = 256;
     constexpr int kItemsPerThread = 4;
     dim3 grid_size(N, 1);
+    cudaMemset(loss, 0, sizeof(float));
     cross_entropy_kernel<kBlockSize, kItemsPerThread>
         <<<grid_size, kBlockSize>>>(logits, true_labels, loss, N, C);
     cudaDeviceSynchronize();

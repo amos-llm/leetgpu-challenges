@@ -32,6 +32,7 @@ extern "C" void solve(const float* A, const float* B, float* result, int N) {
     constexpr int kItemsPerThread = 4;
     constexpr int kItemsPerBlock = kBlockSize * kItemsPerThread;
     int grid_size = (N + kItemsPerBlock - 1) / kItemsPerBlock;
+    cudaMemset(result, 0, sizeof(float));
     dot_product<kBlockSize, kItemsPerThread><<<grid_size, kBlockSize>>>(A, B, result, N);
     cudaDeviceSynchronize();
 }

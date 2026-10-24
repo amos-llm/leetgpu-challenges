@@ -33,6 +33,7 @@ extern "C" void solve(const float* predictions, const float* targets, float* mse
     constexpr int kItemsPerThread = 4;
     constexpr int kItemsPerBlock = kBlockSize * kItemsPerThread;
     int grid_size = (N + kItemsPerBlock - 1) / kItemsPerBlock;
+    cudaMemset(mse, 0, sizeof(float));
     mse_kernel<kBlockSize, kItemsPerThread>
         <<<grid_size, kBlockSize>>>(predictions, targets, mse, N);
     cudaDeviceSynchronize();

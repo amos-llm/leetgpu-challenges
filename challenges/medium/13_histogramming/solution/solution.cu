@@ -35,6 +35,7 @@ extern "C" void solve(const int* input, int* histogram, int N, int num_bins) {
     constexpr int kItemsPerThread = 4;
     constexpr int kItemsPerBlock = kBlockSize * kItemsPerThread;
     int grid_size = (N + kItemsPerBlock - 1) / kItemsPerBlock;
+    cudaMemset(histogram, 0, num_bins * sizeof(int));
     histogram_kernel<kBlockSize, kItemsPerThread>
         <<<grid_size, kBlockSize, num_bins * sizeof(int)>>>(input, histogram, N, num_bins);
     cudaDeviceSynchronize();
