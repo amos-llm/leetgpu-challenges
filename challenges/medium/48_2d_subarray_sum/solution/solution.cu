@@ -30,6 +30,7 @@ extern "C" void solve(const int* input, int* output, int N, int M, int S_ROW, in
     constexpr int kItemsPerThread = 4;
     constexpr int kItemsPerBlock = kBlockSize * kItemsPerThread;
     dim3 grid_size(E_ROW - S_ROW + 1, (E_COL - S_COL + 1 + kItemsPerBlock - 1) / kItemsPerBlock);
+    cudaMemset(output, 0, sizeof(int));
     sum<kBlockSize, kItemsPerThread>
         <<<grid_size, kBlockSize>>>(input, output, N, M, S_ROW, E_ROW, S_COL, E_COL);
     cudaDeviceSynchronize();

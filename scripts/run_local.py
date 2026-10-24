@@ -1,35 +1,27 @@
 #!/usr/bin/env python3
 """
-Run a challenge solution locally for multiple frameworks.
+Run challenge solutions locally and diff them against the reference implementation.
 
-Usage examples:
-    python scripts/run_local.py challenges/easy/1_vector_add \\
-        --framework pytorch --test example
-    python scripts/run_local.py challenges/easy/1_vector_add \\
-        --framework cuda --test functional --index 0
-    # Run all challenges across difficulties (will skip missing solutions)
-    python scripts/run_local.py --all-challenges \\
-        --framework pytorch --test functional
-    # Run all challenges of a specific difficulty (easy|medium|hard):
-    python scripts/run_local.py --all-challenges easy \\
-        --framework pytorch --test functional
-    # Or equivalently:
-    python scripts/run_local.py --all-challenges challenges/easy \\
-        --framework pytorch --test functional
+Selection
+---------
+Every positional argument is a path. A challenge directory runs that challenge; any
+other directory is searched for challenges, so ``challenges/easy`` means every easy
+challenge and ``challenges`` means all of them:
 
-Supported frameworks: pytorch, triton, jax, cuda, cutlass, cute, tilelang, mojo
+    python scripts/run_local.py challenges/easy/1_vector_add --framework pytorch
+    python scripts/run_local.py challenges/easy            --framework triton
+    python scripts/run_local.py challenges                 --framework cuda triton
 
-The script will import the challenge's `challenge.py`, generate tests, load the solution
-implementation for the requested framework (Python solutions are imported directly; CUDA
-solutions are compiled to a shared library with `nvcc`), run the solution on each test,
-and compare outputs against the challenge `reference_impl()` using the tolerances
-in the challenge instance.
+A challenge only runs when ``<challenge>/solution/solution.<framework>`` exists.
+With a single target a missing solution is an error; with several targets the
+challenge is reported as SKIPPED.
+
+Exit codes: 0 everything ran and passed, 1 a case failed, 2 usage/setup error.
 """
 
 from __future__ import annotations
 
 import argparse
-import atexit
 import copy
 import ctypes
 import hashlib
@@ -37,60 +29,222 @@ import importlib.util
 import inspect
 import logging
 import os
-import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import types
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-# ANSI color codes
 GREEN = "\033[92m"
 RED = "\033[91m"
 YELLOW = "\033[93m"
 RESET = "\033[0m"
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CHALLENGES_ROOT = REPO_ROOT / "challenges"
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 logger = logging.getLogger("run_local")
-
-# Caches and helpers to avoid repeated heavy imports/compilation
-_module_cache: Dict[str, types.ModuleType] = {}
-_cuda_lib_cache: Dict[str, Tuple[ctypes.CDLL, float]] = {}
-_signature_cache: Dict[Callable, inspect.Signature] = {}
-_temp_dirs_to_cleanup: List[Path] = []
 
 try:
     import torch  # type: ignore
 
-    _TORCH_AVAILABLE = True
-except Exception:
+    _HAS_TORCH = True
+except Exception:  # pragma: no cover - torch is a hard requirement in practice
     torch = None  # type: ignore
-    _TORCH_AVAILABLE = False
-
-try:
-    import jax  # type: ignore
-    from torch.utils import dlpack  # type: ignore
-
-    _JAX_AVAILABLE = True
-except Exception:
-    jax = None  # type: ignore
-    dlpack = None  # type: ignore
-    _JAX_AVAILABLE = False
+    _HAS_TORCH = False
 
 
-@atexit.register
-def cleanup_temp_dirs():
-    """Clean up temporary CUDA build directories on exit."""
-    for d in _temp_dirs_to_cleanup:
-        shutil.rmtree(d, ignore_errors=True)
+# ── frameworks ────────────────────────────────────────────────────────────────
 
 
-def _sync_gpu() -> None:
-    """Synchronize CUDA if torch is available; otherwise no-op."""
-    if _TORCH_AVAILABLE:
+@dataclass(frozen=True)
+class Framework:
+    """How one framework's solution is stored and invoked."""
+
+    name: str
+    solution_file: str
+    kind: str  # "python" | "cute" | "cuda" | "cutlass"
+
+
+FRAMEWORKS: Dict[str, Framework] = {
+    f.name: f
+    for f in (
+        Framework("pytorch", "solution.pytorch.py", "python"),
+        Framework("triton", "solution.triton.py", "python"),
+        Framework("tilelang", "solution.tilelang.py", "python"),
+        Framework("cute", "solution.cute.py", "cute"),
+        Framework("cuda", "solution.cu", "cuda"),
+        Framework("cutlass", "solution.cutlass.cu", "cutlass"),
+    )
+}
+
+
+# ── loading ───────────────────────────────────────────────────────────────────
+
+_module_cache: Dict[str, types.ModuleType] = {}
+_signature_cache: Dict[int, inspect.Signature] = {}
+
+
+def load_module(path: Path) -> types.ModuleType:
+    """Import a .py file by path, caching by absolute path."""
+    key = str(path.resolve())
+    if key in _module_cache:
+        return _module_cache[key]
+
+    # Expose the top-level `challenges` folder so `from core.challenge_base import ...`
+    # resolves the same way it does for the platform.
+    root = path.parents[2] if len(path.parents) > 2 else path.parent
+    added = str(root) not in sys.path
+    if added:
+        sys.path.insert(0, str(root))
+    try:
+        spec = importlib.util.spec_from_file_location(path.stem, str(path))
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot import {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        if added:
+            sys.path.remove(str(root))
+    _module_cache[key] = module
+    return module
+
+
+def signature_of(func: Callable) -> inspect.Signature:
+    key = id(func)
+    if key not in _signature_cache:
+        _signature_cache[key] = inspect.signature(func)
+    return _signature_cache[key]
+
+
+@dataclass
+class Challenge:
+    """A loaded challenge.py plus the helpers this script needs from it."""
+
+    directory: Path
+    instance: Any
+
+    @classmethod
+    def load(cls, directory: Path) -> "Challenge":
+        challenge_py = directory / "challenge.py"
+        if not challenge_py.exists():
+            raise FileNotFoundError(f"No challenge.py in {directory}")
+        module = load_module(challenge_py)
+        if not hasattr(module, "Challenge"):
+            raise AttributeError(f"{challenge_py} has no `Challenge` class")
+        return cls(directory, module.Challenge())
+
+    @property
+    def label(self) -> str:
+        return f"{self.directory.parent.name}/{self.directory.name}"
+
+    @property
+    def device(self) -> str:
+        return getattr(self.instance, "device", "cuda")
+
+    @property
+    def atol(self) -> float:
+        return self.instance.atol
+
+    @property
+    def rtol(self) -> float:
+        return self.instance.rtol
+
+    def solution(self, framework: Framework) -> Optional[Path]:
+        path = self.directory / "solution" / framework.solution_file
+        return path if path.exists() else None
+
+    def tests(self, kind: str) -> List[Dict[str, Any]]:
+        if kind == "example":
+            return _as_case_list(self.instance.generate_example_test())
+        if kind == "functional":
+            return list(self.instance.generate_functional_test())
+        if kind == "performance":
+            return _as_case_list(self.instance.generate_performance_test())
+        if kind == "all":
+            cases = _as_case_list(self.instance.generate_example_test())
+            cases.extend(self.instance.generate_functional_test())
+            cases.extend(_as_case_list(self.instance.generate_performance_test()))
+            return cases
+        raise ValueError(f"Unknown test suite: {kind}")
+
+    def output_keys(self) -> List[str]:
+        try:
+            signature = self.instance.get_solve_signature()
+        except Exception:
+            return []
+        return [name for name, spec in signature.items() if spec[1] in ("out", "inout")]
+
+
+def _as_case_list(raw: Any) -> List[Dict[str, Any]]:
+    return [raw] if isinstance(raw, dict) else list(raw)
+
+
+# ── test case materialisation ─────────────────────────────────────────────────
+
+_TORCH_DTYPES = {
+    "float32": "float32",
+    "float16": "float16",
+    "bfloat16": "bfloat16",
+    "int32": "int32",
+    "int64": "int64",
+}
+
+
+def _dtype_of(placeholder: Any) -> Any:
+    dtype = getattr(placeholder, "dtype", "float32")
+    if not isinstance(dtype, str):
+        return dtype
+    return getattr(torch, _TORCH_DTYPES.get(dtype, "float32"))
+
+
+def materialize(case: Dict[str, Any], device: str) -> Dict[str, Any]:
+    """Turn RandnTensor / OutTensor / ... placeholders into real tensors on `device`."""
+    if not _HAS_TORCH:
+        return dict(case)
+    builders = {
+        "RandnTensor": lambda p: torch.normal(
+            p.mean, p.std, p.shape, device=device, dtype=_dtype_of(p)
+        ),
+        "RandTensor": lambda p: torch.empty(p.shape, device=device, dtype=_dtype_of(p)).uniform_(
+            p.low, p.high
+        ),
+        "RandIntTensor": lambda p: torch.randint(
+            p.low, p.high, p.shape, device=device, dtype=_dtype_of(p)
+        ),
+        "FullTensor": lambda p: torch.full(p.shape, p.value, device=device, dtype=_dtype_of(p)),
+        "OutTensor": lambda p: torch.empty(p.shape, device=device, dtype=_dtype_of(p)),
+    }
+    return {name: builders.get(type(v).__name__, lambda p: p)(v) for name, v in case.items()}
+
+
+def _clone_value(value: Any) -> Any:
+    if hasattr(value, "clone"):
+        try:
+            return value.clone()
+        except Exception:
+            pass
+    if isinstance(value, (int, float, bool, str, bytes, type(None))):
+        return value
+    if isinstance(value, (list, tuple)):
+        cloned = [_clone_value(item) for item in value]
+        return tuple(cloned) if isinstance(value, tuple) else cloned
+    if isinstance(value, dict):
+        return {k: _clone_value(v) for k, v in value.items()}
+    return copy.deepcopy(value)
+
+
+def clone_case(case: Dict[str, Any]) -> Dict[str, Any]:
+    return {name: _clone_value(value) for name, value in case.items()}
+
+
+def sync_device() -> None:
+    if _HAS_TORCH:
         try:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -98,431 +252,270 @@ def _sync_gpu() -> None:
             pass
 
 
-def load_module_from_path(name: str, path: Path) -> types.ModuleType:
-    # Use a cache keyed by absolute path to avoid reloading modules repeatedly.
-    pstr = str(path.resolve())
-    if pstr in _module_cache:
-        return _module_cache[pstr]
-
-    # Ensure the top-level `challenges` folder is on sys.path so imports like
-    # `from core.challenge_base import ChallengeBase` succeed.
-    base_dir = None
-    try:
-        # path: .../challenges/<difficulty>/<name>/challenge.py -> add .../challenges
-        base_dir = path.parents[2]
-    except Exception:
-        base_dir = path.parent
-
-    base_str = str(base_dir)
-    inserted = False
-    if base_str not in sys.path:
-        sys.path.insert(0, base_str)
-        inserted = True
-
-    try:
-        spec = importlib.util.spec_from_file_location(name, str(path))
-        if spec is None or spec.loader is None:
-            raise ImportError(f"Cannot import {path}")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _module_cache[pstr] = mod
-        return mod
-    finally:
-        if inserted:
-            try:
-                sys.path.remove(base_str)
-            except Exception:
-                pass
+# ── runners ───────────────────────────────────────────────────────────────────
 
 
-def find_solution_file(challenge_dir: Path, framework: str) -> Path:
-    mapping = {
-        "pytorch": "solution.pytorch.py",
-        "triton": "solution.triton.py",
-        "jax": "solution.jax.py",
-        "cute": "solution.cute.py",
-        "tilelang": "solution.tilelang.py",
-        "cuda": "solution.cu",
-        "cutlass": "solution.cutlass.cu",
-        "mojo": "solution.mojo",
-    }
-    if framework not in mapping:
-        raise ValueError(f"Unsupported framework: {framework}")
-    p = challenge_dir / "solution" / mapping[framework]
-    if not p.exists():
-        raise FileNotFoundError(f"Solution file not found: {p}")
-    return p
-
-
-def _normalize_test_output(t: Any) -> List[Dict[str, Any]]:
-    """Normalize test output to always be a list."""
-    return [t] if isinstance(t, dict) else list(t)
-
-
-def normalize_tests(challenge: Any, test_kind: str) -> List[Dict[str, Any]]:
-    if test_kind == "example":
-        return _normalize_test_output(challenge.generate_example_test())
-    if test_kind == "functional":
-        return list(challenge.generate_functional_test())
-    if test_kind == "performance":
-        return _normalize_test_output(challenge.generate_performance_test())
-    if test_kind == "all":
-        out = []
-        out.extend(_normalize_test_output(challenge.generate_example_test()))
-        out.extend(challenge.generate_functional_test())
-        out.extend(_normalize_test_output(challenge.generate_performance_test()))
-        return out
-    raise ValueError(f"Unknown test kind: {test_kind}")
-
-
-def _signature_of(func: Callable) -> inspect.Signature:
-    """``inspect.signature`` with a cache (not cheap for DSL-wrapped callables)."""
-    if func not in _signature_cache:
-        _signature_cache[func] = inspect.signature(func)
-    return _signature_cache[func]
-
-
-def map_params_to_signature(func, case_insensitive_params: Dict[str, Any]) -> List[Any]:
-    """Return ordered args for func by matching its parameter names case-insensitively."""
-    sig = _signature_of(func)
-    lower_map = {k.lower(): v for k, v in case_insensitive_params.items()}
+def order_args(func: Callable, case: Dict[str, Any]) -> List[Any]:
+    """Order `case` values to match `func`'s parameter names (case-insensitive)."""
+    by_lower = {name.lower(): value for name, value in case.items()}
     args: List[Any] = []
-    for pname in sig.parameters:
-        pick = lower_map.get(pname.lower())
-        if pick is None:
-            raise TypeError(f"Could not map parameter '{pname}' for function {func}")
-        args.append(pick)
+    for name in signature_of(func).parameters:
+        if name.lower() not in by_lower:
+            raise TypeError(f"Cannot map parameter '{name}' of {func!r} from test case")
+        args.append(by_lower[name.lower()])
     return args
 
 
-def _torch_to_jax(x):
-    """Convert torch tensor to JAX array via DLPack."""
-    if not hasattr(x, "to"):
-        return x
-    return jax.dlpack.from_dlpack(dlpack.to_dlpack(x))
+def collect_outputs(
+    func: Callable,
+    out_keys: List[str],
+    case: Dict[str, Any],
+    args: List[Any],
+    returned: Any,
+) -> Dict[str, Any]:
+    """Map solve()'s outputs to the names declared by get_solve_signature()."""
+    outputs: Dict[str, Any] = {}
+    if returned is not None:
+        outputs[out_keys[0] if out_keys else "C"] = returned
+    if out_keys:
+        positions = {name.lower(): i for i, name in enumerate(signature_of(func).parameters)}
+        for key in out_keys:
+            if key in outputs:
+                continue
+            index = positions.get(key.lower())
+            if index is not None and index < len(args):
+                outputs[key] = args[index]
+    elif returned is None:
+        outputs[list(case)[-1]] = args[-1]
+    return outputs
 
 
-def _jax_to_torch(x):
-    """Convert JAX array to torch tensor via DLPack."""
-    try:
-        if _JAX_AVAILABLE and "jax" in sys.modules and hasattr(x, "__dlpack__"):
-            return dlpack.from_dlpack(jax.dlpack.to_dlpack(x))
-    except Exception:
-        pass
-    return x
+class Runner:
+    """A solution that can be called repeatedly on the same materialised test case."""
+
+    def __init__(self, framework: Framework, solution: Path, challenge: Challenge):
+        self.framework = framework
+        self.solution = solution
+        self.challenge = challenge
+
+    def run(self, case: Dict[str, Any]) -> Dict[str, Any]:
+        raise NotImplementedError
 
 
-def _cute_assumed_align(v: Any) -> Optional[int]:
-    """Largest power-of-two byte alignment that ``v``'s data pointer actually satisfies.
+class PythonRunner(Runner):
+    """A Python solution module invoked with keyword-matched positional arguments."""
 
-    CuTeDSL derives a pointer's ``align<N>`` type attribute from the ``assumed_align``
-    argument of ``from_dlpack`` and defaults to the element size, because DLPack does not
-    carry alignment information. That default caps cute solutions at scalar (<= 32 bit)
-    copies even though CUDA allocations are 256B+ aligned. Deriving the value from the
-    pointer itself keeps the declaration truthful for views and slices too.
+    def __init__(self, framework: Framework, solution: Path, challenge: Challenge):
+        super().__init__(framework, solution, challenge)
+        self.solve = load_module(solution).solve
+
+    def run(self, case: Dict[str, Any]) -> Dict[str, Any]:
+        args = order_args(self.solve, case)
+        returned = self.solve(*args)
+        return collect_outputs(self.solve, self.challenge.output_keys(), case, args, returned)
+
+
+class CuteRunner(PythonRunner):
+    """CuTeDSL solution: DLPack conversion, one-time @cute.jit compile, plan reuse."""
+
+    def __init__(self, framework: Framework, solution: Path, challenge: Challenge):
+        super().__init__(framework, solution, challenge)
+        self._plan: Optional[Tuple[Dict[str, Any], List[Any], Callable, Dict[str, Any]]] = None
+        self._compiled: Dict[Any, Callable] = {}
+        self._cute_tensors: Dict[Any, Any] = {}
+        self._torch_backing: Dict[int, Any] = {}
+        self._warned = False
+
+    def run(self, case: Dict[str, Any]) -> Dict[str, Any]:
+        if self._plan is not None and self._plan[0] is case:
+            self._plan[2](*self._plan[1])
+            return dict(self._plan[3])
+
+        args = order_args(self.solve, {k: self._to_cute(v) for k, v in case.items()})
+        call = self._compile_entry(args)
+        returned = call(*args)
+        outputs = collect_outputs(self.solve, self.challenge.output_keys(), case, args, returned)
+        outputs = {k: self._torch_backing.get(id(v), v) for k, v in outputs.items()}
+        self._plan = (case, args, call, outputs)
+        return outputs
+
+    def _compile_entry(self, args: List[Any]) -> Callable:
+        if not hasattr(self.solve, "_dsl_cls"):
+            if not self._warned:
+                self._warned = True
+                logger.warning(
+                    "cute entry point is not decorated with @cute.jit; the grading backend "
+                    "compiles the entry point itself and will reject this solution."
+                )
+            return self.solve
+
+        key = (id(self.solve), _cute_call_key(args))
+        if key not in self._compiled:
+            from cutlass import cute
+
+            compiled = cute.compile(self.solve, *args)
+
+            def entry(*call_args: Any) -> None:
+                # The compiled wrapper returns a status code, not the outputs.
+                compiled(*call_args)
+
+            self._compiled[key] = entry
+        return self._compiled[key]
+
+    def _to_cute(self, value: Any) -> Any:
+        if not (hasattr(value, "dtype") and str(getattr(value, "device", "")).startswith("cuda")):
+            return value
+        key = (int(value.data_ptr()), tuple(value.shape), str(value.dtype), tuple(value.stride()))
+        if key not in self._cute_tensors:
+            from cutlass.cute.runtime import from_dlpack
+
+            align = _cute_assumed_align(value)
+            try:
+                tensor = from_dlpack(value, assumed_align=align) if align else from_dlpack(value)
+            except Exception:
+                tensor = from_dlpack(value)
+            self._cute_tensors[key] = tensor
+        tensor = self._cute_tensors[key]
+        self._torch_backing[id(tensor)] = value
+        return tensor
+
+
+def _cute_assumed_align(value: Any) -> Optional[int]:
+    """Largest power-of-two byte alignment the tensor's data pointer satisfies.
+
+    CuTeDSL defaults ``assumed_align`` to the element size because DLPack carries no
+    alignment information, which would cap copies at scalar width even though CUDA
+    allocations are 256B+ aligned. Deriving it from the pointer keeps the declaration
+    truthful for views and slices too.
     """
     try:
-        ptr = int(v.data_ptr())
-        elem_size = int(v.element_size())
+        pointer = int(value.data_ptr())
+        element_size = int(value.element_size())
     except Exception:
         return None
-    if ptr <= 0:
+    if pointer <= 0:
         return None
-    align = min(ptr & -ptr, 128)  # largest power of two dividing ptr, capped
-    return align if align >= elem_size else None
+    align = min(pointer & -pointer, 128)
+    return align if align >= element_size else None
 
 
-def _to_cute_tensor(v: Any):
-    """Convert a torch tensor to a CuTeDSL tensor declaring its real pointer alignment.
-
-    Cached by (pointer, shape, dtype, strides) so the repeated timed calls of one test
-    case do not pay the conversion again.
-    """
-    from cutlass.cute.runtime import from_dlpack
-
-    try:
-        key = (int(v.data_ptr()), tuple(v.shape), str(v.dtype), tuple(v.stride()))
-    except Exception:
-        key = None
-    if key is not None and key in _cute_tensor_cache:
-        return _cute_tensor_cache[key]
-
-    align = _cute_assumed_align(v)
-    tensor = None
-    if align is not None:
-        try:
-            tensor = from_dlpack(v, assumed_align=align)
-        except Exception:
-            tensor = None
-    if tensor is None:
-        tensor = from_dlpack(v)
-    if key is not None:
-        _cute_tensor_cache[key] = tensor
-    return tensor
-
-
-_cute_tensor_cache: Dict[Any, Any] = {}
-_cute_compiled_cache: Dict[Any, Any] = {}
-_cute_warned: set = set()
-
-
-_cute_plan: Optional[Tuple[Any, ...]] = None
-
-
-def _cute_plan_lookup(case: Dict[str, Any]):
-    """Return the prepared call plan for ``case`` while it is still the current one.
-
-    The grading backend prepares (converts + compiles) the arguments once per test case
-    (``prepare_timed_call``) and the timed loop only calls the compiled entry.
-    """
-    return _cute_plan if _cute_plan is not None and _cute_plan[0] is case else None
-
-
-def _cute_plan_store(
-    case: Dict[str, Any], args: Tuple[Any, ...], call: Any, outs: Dict[str, Any]
-) -> None:
-    global _cute_plan
-    _cute_plan = (case, args, call, outs)
-
-
-def _cute_call_key(args: Tuple[Any, ...]) -> Tuple[Any, ...]:
-    """Signature identifying one cute test case (tensor shapes/dtypes + scalars)."""
+def _cute_call_key(args: List[Any]) -> Tuple[Any, ...]:
     key: List[Any] = []
-    for a in args:
-        if hasattr(a, "shape") and hasattr(a, "element_type"):
-            key.append((str(a.element_type), tuple(int(s) for s in a.shape)))
+    for arg in args:
+        if hasattr(arg, "shape") and hasattr(arg, "element_type"):
+            key.append((str(arg.element_type), tuple(int(dim) for dim in arg.shape)))
         else:
-            key.append(a)
+            key.append(arg)
     return tuple(key)
 
 
-def _cute_timed_entry(solve: Any, args: Tuple[Any, ...]) -> Any:
-    """Compile the ``@cute.jit`` entry once and return a cheap callable for it.
+_CTYPE_BUILDERS: Dict[Any, Callable[[Any], Any]] = {
+    ctypes.c_float: ctypes.c_float,
+    ctypes.c_double: ctypes.c_double,
+    ctypes.c_int: lambda v: ctypes.c_int(int(v)),
+    ctypes.c_size_t: lambda v: ctypes.c_size_t(int(v)),
+}
 
-    The grading backend compiles the entry point before timing it
-    (``prepare_timed_call``) and then times the compiled callable. Calling the entry
-    point directly re-runs its host-side body (layout construction, grid math) on every
-    invocation, which hides the kernel time. The compiled wrapper returns a status code,
-    so its return value is dropped here.
+
+class CudaRunner(Runner):
+    """CUDA / CUTLASS solution: compile once, then call through ctypes."""
+
+    def __init__(self, framework: Framework, solution: Path, challenge: Challenge):
+        super().__init__(framework, solution, challenge)
+        self.sig_map = challenge.instance.get_solve_signature()
+        library = compile_shared(solution, cutlass=framework.kind == "cutlass")
+        self.lib = ctypes.CDLL(str(library))
+
+    def run(self, case: Dict[str, Any]) -> Dict[str, Any]:
+        by_lower = {name.lower(): value for name, value in case.items()}
+        call_args: List[Any] = []
+        resolved: Dict[str, Any] = {}
+
+        for name, (ctype_spec, _) in self.sig_map.items():
+            if name.lower() not in by_lower:
+                raise KeyError(f"Missing parameter '{name}' in test case")
+            value = by_lower[name.lower()]
+            if hasattr(value, "device"):
+                if not str(value.device).startswith("cuda"):
+                    value = value.cuda()
+                resolved[name] = value
+                call_args.append(ctypes.c_void_p(value.data_ptr()))
+            else:
+                resolved[name] = value
+                call_args.append(_scalar_arg(ctype_spec, value))
+
+        self.lib.solve(*call_args)
+        return {name: resolved[name] for name in self.challenge.output_keys() if name in resolved}
+
+
+def _scalar_arg(ctype_spec: Any, value: Any) -> Any:
+    builder = _CTYPE_BUILDERS.get(ctype_spec)
+    if builder is not None:
+        return builder(value)
+    return ctypes.c_double(value) if isinstance(value, float) else ctypes.c_int(int(value))
+
+
+def find_nvcc() -> str:
+    """Locate nvcc, falling back to the usual CUDA toolkit install locations."""
+    found = shutil.which("nvcc")
+    if found:
+        return found
+    for root in (os.environ.get("CUDA_HOME"), os.environ.get("CUDA_PATH"), "/usr/local/cuda"):
+        if root and (Path(root) / "bin" / "nvcc").exists():
+            return str(Path(root) / "bin" / "nvcc")
+    raise FileNotFoundError(
+        "nvcc not found (looked in PATH, $CUDA_HOME/bin, $CUDA_PATH/bin, /usr/local/cuda/bin); "
+        "install the CUDA toolkit to run .cu files"
+    )
+
+
+def _arch_flags() -> List[str]:
+    """Target the GPU we are about to run on.
+
+    nvcc's default ``-arch`` is older than most current devices (CUDA 13 still defaults
+    to sm_75), and a cubin built for the wrong SM silently fails to launch, leaving the
+    output buffers untouched. Compiling for the local device capability is what a local
+    runner wants; the grading platform compiles its own binaries.
     """
-    key = (id(solve), _cute_call_key(args))
-    if key not in _cute_compiled_cache:
-        from cutlass import cute
-
-        compiled = cute.compile(solve, *args)
-
-        def _run(*call_args: Any) -> None:
-            compiled(*call_args)
-
-        _cute_compiled_cache[key] = _run
-    return _cute_compiled_cache[key]
-
-
-def run_python_solution(
-    solution_path: Path | types.ModuleType,
-    framework: str,
-    test_case: Dict[str, Any],
-    challenge: Any,
-) -> Tuple[Dict[str, Any], Any]:
-    # Allow passing either a preloaded module or a path to the solution file.
-    if isinstance(solution_path, types.ModuleType):
-        mod = solution_path
-    else:
-        mod = load_module_from_path("solution_module", solution_path)
-
-    if not hasattr(mod, "solve"):
-        raise AttributeError("solution module has no `solve` function")
-    solve = mod.solve
-
-    if framework == "cute":
-        plan = _cute_plan_lookup(test_case)
-        if plan is not None:
-            plan[2](*plan[1])
-            return dict(plan[3]), None
-
-    # Prepare case-insensitive mapping of params
-    params = test_case
-
-    # For JAX, attempt dlpack conversion (if jax is available)
-    if framework == "jax" and _JAX_AVAILABLE:
-        try:
-            params = {k: _torch_to_jax(v) if hasattr(v, "dtype") else v for k, v in params.items()}
-        except Exception:
-            # if jax or dlpack not available, continue and let caller see any errors
-            pass
-
-    # For CuteDSL, convert torch tensors to cute tensors
-    cute_tensor_map = {}
-    if framework == "cute":
-        try:
-            new_params = {}
-            for k, v in params.items():
-                if hasattr(v, "dtype") and str(v.device).startswith("cuda"):
-                    cute_v = _to_cute_tensor(v)
-                    new_params[k] = cute_v
-                    cute_tensor_map[id(cute_v)] = v
-                else:
-                    new_params[k] = v
-            params = new_params
-        except Exception:
-            pass
-
-    # Call solve with matched signature order
-    ordered_args = map_params_to_signature(solve, params)
-
-    # Mirror the grading backend, which compiles the @cute.jit entry before timing it.
-    call = solve
-    if framework == "cute":
-        if hasattr(solve, "_dsl_cls"):
-            call = _cute_timed_entry(solve, tuple(ordered_args))
-        elif id(solve) not in _cute_warned:
-            _cute_warned.add(id(solve))
-            logger.warning(
-                "cute entry point is not decorated with @cute.jit; the grading backend "
-                "compiles the entry point itself and will reject this solution."
-            )
-
-    ret = call(*ordered_args)
-
-    # Determine output(s): use challenge.get_solve_signature() if available
-    out_keys: List[str] = []
     try:
-        sig_map = challenge.get_solve_signature()
-        out_keys = [k for k, v in sig_map.items() if v[1] in ["out", "inout"]]
+        major, minor = torch.cuda.get_device_capability()
     except Exception:
-        # fallback: if solve returned a value, assume it's the output
-        pass
-
-    result: Dict[str, Any] = {}
-    if ret is not None:
-        # solver returned something; assume it's the primary output
-        result_out_key = out_keys[0] if out_keys else "C"
-        result[result_out_key] = ret
-
-    # take the argument object(s) corresponding to out_keys (incl. inout)
-    if out_keys:
-        sig = _signature_of(solve)
-        param_names = list(sig.parameters.keys())
-        name_to_idx = {pn.lower(): i for i, pn in enumerate(param_names)}
-        for ok in out_keys:
-            if ok in result:
-                continue
-            idx = name_to_idx.get(ok.lower())
-            if idx is not None:
-                result[ok] = ordered_args[idx]
-    elif ret is None:
-        # best-effort: assume last arg is output
-        result_key = list(test_case.keys())[-1]
-        result[result_key] = ordered_args[-1]
-
-    # For CuteDSL, map cute tensors back to original torch tensors for comparison
-    if framework == "cute" and cute_tensor_map:
-        for k, v in list(result.items()):
-            if id(v) in cute_tensor_map:
-                result[k] = cute_tensor_map[id(v)]
-
-    if framework == "cute" and hasattr(solve, "_dsl_cls"):
-        _cute_plan_store(test_case, tuple(ordered_args), call, dict(result))
-
-    return result, ret
+        return []
+    return [f"-arch=sm_{major}{minor}"]
 
 
-def compile_cuda_shared(solution_cu: Path, build_dir: Optional[Path] = None) -> Path:
-    nvcc = shutil.which("nvcc")
-    if nvcc is None:
-        raise FileNotFoundError(
-            "nvcc not found in PATH. Install CUDA toolkit to compile .cu files."
-        )
+def compile_shared(solution_cu: Path, cutlass: bool = False) -> Path:
+    """Compile a .cu solution into a shared library, cached by source content hash."""
+    nvcc = find_nvcc()
 
-    if build_dir is not None:
-        so_path = build_dir / "solution_lib.so"
-        cmd = [
-            nvcc,
-            "-O2",
-            "-shared",
-            "-Xcompiler",
-            "-fPIC",
-            "-o",
-            str(so_path),
-            str(solution_cu),
-        ]
-        logger.info("Compiling %s -> %s", solution_cu, so_path)
-        res = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        if res.returncode != 0:
-            logger.error("nvcc failed:\n%s", res.stdout)
-            raise RuntimeError("Failed to compile CUDA solution")
-        return so_path
+    label = "CUDA"
+    extra_flags: List[str] = []
+    cache_name = "run_local_cuda_cache"
+    if cutlass:
+        include = REPO_ROOT / "3rdparty" / "cutlass" / "include"
+        if not include.exists():
+            raise FileNotFoundError(
+                f"CUTLASS headers not found at {include}. "
+                "Run `git submodule update --init --recursive`."
+            )
+        label = "CUTLASS"
+        extra_flags = ["-I", str(include), "-I", str(include.parent)]
+        cache_name = "run_local_cutlass_cache"
 
     file_hash = hashlib.sha256(solution_cu.read_bytes()).hexdigest()[:16]
-    cache_dir = Path(
-        os.environ.get("RUN_LOCAL_CUDA_CACHE", Path(tempfile.gettempdir()) / "run_local_cuda_cache")
-    )
+    cache_dir = Path(tempfile.gettempdir()) / cache_name
     cache_dir.mkdir(parents=True, exist_ok=True)
     so_path = cache_dir / f"{solution_cu.stem}_{file_hash}.so"
-
     if so_path.exists():
-        src_mtime = solution_cu.stat().st_mtime
-        cache_mtime = so_path.stat().st_mtime
-        if cache_mtime >= src_mtime:
-            logger.info("Using cached CUDA shared library: %s", so_path)
-            return so_path
+        logger.info("Using cached %s library: %s", label, so_path)
+        return so_path
 
-    cmd = [
-        nvcc,
-        "-O2",
-        "-shared",
-        "-Xcompiler",
-        "-fPIC",
-        "-o",
-        str(so_path),
-        str(solution_cu),
-    ]
-    logger.info("Compiling %s -> %s", solution_cu, so_path)
-    res = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    if res.returncode != 0:
-        logger.error("nvcc failed:\n%s", res.stdout)
-        raise RuntimeError("Failed to compile CUDA solution")
-    return so_path
-
-
-def _find_cutlass_include_dir() -> Path:
-    """Locate the CUTLASS include directory relative to the repo root."""
-    repo_root = Path(__file__).resolve().parents[1]
-    cutlass_include = repo_root / "3rdparty" / "cutlass" / "include"
-    if not cutlass_include.exists():
-        raise FileNotFoundError(
-            f"CUTLASS include directory not found at {cutlass_include}. "
-            "Did you forget `git submodule update --init --recursive`?"
-        )
-    return cutlass_include
-
-
-def compile_cutlass_shared(solution_cu: Path, build_dir: Optional[Path] = None) -> Path:
-    """Compile a .cu solution file with CUTLASS headers into a shared library."""
-    nvcc = shutil.which("nvcc")
-    if nvcc is None:
-        raise FileNotFoundError(
-            "nvcc not found in PATH. Install CUDA toolkit to compile .cu files."
-        )
-
-    cutlass_include = _find_cutlass_include_dir()
-    extra_flags = ["-I", str(cutlass_include), "-I", str(cutlass_include.parent)]
-
-    if build_dir is not None:
-        so_path = build_dir / "solution_lib.so"
-        cmd = [
+    logger.info("Compiling %s %s -> %s", label, solution_cu, so_path)
+    result = subprocess.run(
+        [
             nvcc,
             "-O2",
+            *_arch_flags(),
             "-shared",
             "-Xcompiler",
             "-fPIC",
@@ -530,1107 +523,664 @@ def compile_cutlass_shared(solution_cu: Path, build_dir: Optional[Path] = None) 
             str(so_path),
             str(solution_cu),
             *extra_flags,
-        ]
-        logger.info("Compiling CUTLASS %s -> %s", solution_cu, so_path)
-        res = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        if res.returncode != 0:
-            logger.error("nvcc failed:\n%s", res.stdout)
-            raise RuntimeError("Failed to compile CUTLASS solution")
-        return so_path
-
-    file_hash = hashlib.sha256(solution_cu.read_bytes()).hexdigest()[:16]
-    cache_dir = Path(
-        os.environ.get(
-            "RUN_LOCAL_CUTLASS_CACHE", Path(tempfile.gettempdir()) / "run_local_cutlass_cache"
-        )
-    )
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    so_path = cache_dir / f"{solution_cu.stem}_{file_hash}.so"
-
-    if so_path.exists():
-        src_mtime = solution_cu.stat().st_mtime
-        cache_mtime = so_path.stat().st_mtime
-        if cache_mtime >= src_mtime:
-            logger.info("Using cached CUTLASS shared library: %s", so_path)
-            return so_path
-
-    cmd = [
-        nvcc,
-        "-O2",
-        "-shared",
-        "-Xcompiler",
-        "-fPIC",
-        "-o",
-        str(so_path),
-        str(solution_cu),
-        *extra_flags,
-    ]
-    logger.info("Compiling CUTLASS %s -> %s", solution_cu, so_path)
-    res = subprocess.run(
-        cmd,
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
-    if res.returncode != 0:
-        logger.error("nvcc failed:\n%s", res.stdout)
-        raise RuntimeError("Failed to compile CUTLASS solution")
+    if result.returncode != 0:
+        logger.error("nvcc failed:\n%s", result.stdout)
+        raise RuntimeError(f"Failed to compile {label} solution")
     return so_path
 
 
-def _fast_clone_value(v: Any) -> Any:
-    if hasattr(v, "clone"):
-        try:
-            return v.clone()
-        except Exception:
-            pass
-    if isinstance(v, (int, float, bool, str, bytes, type(None))):
-        return v
-    if isinstance(v, (list, tuple)):
-        cloned = [_fast_clone_value(x) for x in v]
-        return tuple(cloned) if isinstance(v, tuple) else cloned
-    if isinstance(v, dict):
-        return {kk: _fast_clone_value(vv) for kk, vv in v.items()}
-    try:
-        return copy.deepcopy(v)
-    except Exception:
-        return v
+def make_runner(framework: Framework, solution: Path, challenge: Challenge) -> Runner:
+    if framework.kind == "cute":
+        return CuteRunner(framework, solution, challenge)
+    if framework.kind in ("cuda", "cutlass"):
+        return CudaRunner(framework, solution, challenge)
+    return PythonRunner(framework, solution, challenge)
 
 
-def _clone_case(case: Dict[str, Any]) -> Dict[str, Any]:
-    return {k: _fast_clone_value(v) for k, v in case.items()}
+# ── timing ────────────────────────────────────────────────────────────────────
 
 
-def _materialize_case(case: Dict[str, Any], device: str = "cuda") -> Dict[str, Any]:
-    """Convert RandnTensor / OutTensor / etc. placeholders into real torch tensors."""
-    if not _TORCH_AVAILABLE:
-        return case
-
-    _dtype_map = {
-        "float32": torch.float32,
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-        "int32": torch.int32,
-        "int64": torch.int64,
-    }
-
-    def _resolve_dtype(dtype_str):
-        if hasattr(dtype_str, "dtype") and not isinstance(dtype_str, str):
-            return dtype_str
-        return _dtype_map.get(dtype_str, torch.float32)
-
-    result = {}
-    for k, v in case.items():
-        cls_name = v.__class__.__name__ if hasattr(v, "__class__") else ""
-        if cls_name == "RandnTensor":
-            dt = _resolve_dtype(v.dtype)
-            result[k] = torch.normal(v.mean, v.std, v.shape, device=device, dtype=dt)
-        elif cls_name == "RandTensor":
-            dt = _resolve_dtype(v.dtype)
-            result[k] = torch.empty(v.shape, device=device, dtype=dt).uniform_(v.low, v.high)
-        elif cls_name == "FullTensor":
-            dt = _resolve_dtype(v.dtype)
-            result[k] = torch.full(v.shape, v.value, device=device, dtype=dt)
-        elif cls_name == "RandIntTensor":
-            dt = _resolve_dtype(v.dtype)
-            result[k] = torch.randint(v.low, v.high, v.shape, device=device, dtype=dt)
-        elif cls_name == "OutTensor":
-            dt = _resolve_dtype(v.dtype)
-            result[k] = torch.empty(v.shape, device=device, dtype=dt)
-        else:
-            result[k] = v
-    return result
-
-
-def _run_with_warmup_and_measure(
-    callable_func: Callable[[Dict[str, Any]], Any],
-    test_case: Dict[str, Any],
+def time_calls(
+    call: Callable[[Dict[str, Any]], Any],
+    case: Dict[str, Any],
     warmup: int,
     repeat: int,
-) -> Tuple[List[float], Any]:
-    measured = None
-    times: List[float] = []
-    # The grading backend prepares the arguments once (prepare_timed_call) and reuses them
-    # for every timed call, so clone a pristine case once instead of once per iteration.
-    prepared = _clone_case(test_case)
-    runs = max(1, repeat)
-    # warmup
-    for _ in range(warmup):
-        callable_func(prepared)
-        _sync_gpu()
-    # measured runs: host call + sync, which is what the grading backend measures
-    for _ in range(runs):
-        t0 = time.perf_counter()
-        out = callable_func(prepared)
-        _sync_gpu()
-        elapsed = time.perf_counter() - t0
-        times.append(elapsed)
-        if measured is None:
-            measured = out
-    return times, measured
+) -> List[float]:
+    """Time `call` on `case`; returns one host-side measurement per repetition.
 
-
-def run_cuda_solution(
-    solution_cu: Path,
-    test_case: Dict[str, Any],
-    challenge: Any,
-    lib: Optional[ctypes.CDLL] = None,
-) -> Dict[str, Any]:
-    """Call the compiled CUDA solution. If `lib` is provided, reuse it (no compile).
-
-    If `lib` is None this function will compile the solution into a new temp build
-    dir and load it.
+    The outputs of these calls are deliberately ignored: kernels that accumulate with
+    ``atomicAdd`` (or any non-idempotent write) would otherwise have their repeated
+    results compared against a single reference call. Correctness is checked separately
+    on one fresh invocation. At least one untimed warmup runs because first-call effects
+    (torch dispatch, CuTeDSL tracing, allocator growth) would be charged to the
+    measurement otherwise.
     """
-    key = str(solution_cu.resolve())
-    if lib is None and key in _cuda_lib_cache:
-        cached_lib, cached_mtime = _cuda_lib_cache[key]
-        if cached_mtime >= solution_cu.stat().st_mtime:
-            lib = cached_lib
+    for _ in range(max(warmup, 1)):
+        call(case)
+        sync_device()
 
-    if lib is None:
-        so = compile_cuda_shared(solution_cu)
-        lib = ctypes.CDLL(str(so))
-        # cache the loaded library for future runs in this process
-        _cuda_lib_cache[key] = (lib, solution_cu.stat().st_mtime)
-
-    # get signature mapping from challenge
-    sig_map = challenge.get_solve_signature()
-    # order arguments by signature keys ordering (preserve insertion order)
-    arg_names = list(sig_map.keys())
-
-    # Prepare args for call (use lower-case map for fast lookup)
-    lower_map = {k.lower(): (k, v) for k, v in test_case.items()}
-    call_args = []
-    for name in arg_names:
-        entry = lower_map.get(name.lower())
-        if entry is None:
-            raise KeyError(f"Missing parameter {name} for CUDA solution")
-        orig_key, val = entry
-
-        ctype_spec, direction = sig_map[name]
-        # If tensor: pass device pointer
-        if hasattr(val, "device"):
-            # ensure it's on CUDA
-            if str(val.device).startswith("cuda"):
-                ptr = val.data_ptr()
-            else:
-                # move to cuda and update map so outputs point to the CUDA tensor
-                v = val.cuda()
-                lower_map[name.lower()] = (orig_key, v)
-                ptr = v.data_ptr()
-            call_args.append(ctypes.c_void_p(ptr))
-        else:
-            # Handle scalar (non-tensor) args according to the declared ctype_spec
-            # so they are passed with the correct calling convention.
-            try:
-                # Common scalar ctypes handled explicitly
-                if ctype_spec is ctypes.c_float:
-                    call_args.append(ctypes.c_float(val))
-                elif ctype_spec is ctypes.c_double:
-                    call_args.append(ctypes.c_double(val))
-                elif ctype_spec is ctypes.c_int:
-                    call_args.append(ctypes.c_int(int(val)))
-                elif ctype_spec is ctypes.c_size_t:
-                    call_args.append(ctypes.c_size_t(int(val)))
-                else:
-                    # Fallback: choose reasonable wrapper based on Python type
-                    if isinstance(val, float):
-                        call_args.append(ctypes.c_double(val))
-                    else:
-                        call_args.append(ctypes.c_int(int(val)))
-            except Exception:
-                # As a last resort, pass the raw int value
-                call_args.append(int(val))
-
-    # call function
-    func = lib.solve
-    # call via ctypes using *call_args
-    func(*call_args)
-
-    # extract outputs according to sig_map where direction is 'out' or 'inout'
-    outs: Dict[str, Any] = {}
-    for name, (_, direction) in sig_map.items():
-        if direction in ("out", "inout"):
-            entry = lower_map.get(name.lower())
-            if entry is not None:
-                outs[name] = entry[1]
-    return outs
+    times: List[float] = []
+    for _ in range(max(repeat, 1)):
+        start = time.perf_counter()
+        call(case)
+        sync_device()
+        times.append(time.perf_counter() - start)
+    return times
 
 
-def _unwrap_list_tuple(actual):
-    """Unwrap actual if it's a list or tuple (take first element)."""
-    if isinstance(actual, (list, tuple)):
-        actual = actual[0]
-    return actual
+def reference_outputs(
+    challenge: Challenge, case: Dict[str, Any], out_keys: List[str]
+) -> Dict[str, Any]:
+    """Run reference_impl in place and return the declared output tensors."""
+    challenge.instance.reference_impl(**case)
+    if out_keys:
+        return {key: case[key] for key in out_keys if key in case}
+    return {list(case)[-1]: case[list(case)[-1]]}
 
 
-def compare_tensors(expected, actual, atol: float, rtol: float) -> bool:
-    actual = _unwrap_list_tuple(actual)
+# ── comparison ────────────────────────────────────────────────────────────────
 
-    if _TORCH_AVAILABLE and hasattr(expected, "to") and hasattr(actual, "to"):
+
+def _unwrap(value: Any) -> Any:
+    return value[0] if isinstance(value, (list, tuple)) and len(value) == 1 else value
+
+
+def outputs_match(expected: Any, actual: Any, atol: float, rtol: float) -> bool:
+    actual = _unwrap(actual)
+    if _HAS_TORCH and hasattr(expected, "to") and hasattr(actual, "to"):
         try:
-            # For integer types, use exact equality
-            if not torch.is_floating_point(expected) and not torch.is_floating_point(actual):
-                return torch.equal(expected, actual)
-            # For float types, use allclose with tolerances
-            return torch.allclose(expected, actual, atol=atol, rtol=rtol)
+            integer = not torch.is_floating_point(expected) and not torch.is_floating_point(actual)
+            if integer:
+                return bool(torch.equal(expected, actual))
+            return bool(torch.allclose(expected, actual, atol=atol, rtol=rtol))
         except Exception:
-            # if shapes mismatch or other error
             return False
-    # fallback equality
-    return expected == actual
-
-
-def _to_cpu(tensor):
-    """Move tensor to CPU, handling detach if needed."""
     try:
-        if hasattr(tensor, "detach"):
-            return tensor.detach().cpu()
-        return tensor.cpu()
+        return bool(expected == actual)
     except Exception:
-        return tensor
+        return False
 
 
-def _compute_mismatch_stats(e, a, numel: int, atol: float, rtol: float):
-    """Compute max/mean absolute difference and mismatch count."""
-    is_close = torch.isclose(e, a, atol=atol, rtol=rtol)
-    mask = ~is_close
-    n_mismatch = int(mask.reshape(-1).sum().item())
-    max_abs = float((e - a).abs().max().item()) if numel > 0 else float("nan")
-    mean_abs = float((e - a).abs().mean().item()) if numel > 0 else float("nan")
-    pct = (n_mismatch / numel * 100.0) if numel > 0 else 0.0
-    return n_mismatch, max_abs, mean_abs, pct, mask
-
-
-def get_mismatch_details(
+def describe_mismatch(
     name: str,
-    expected,
-    actual,
+    expected: Any,
+    actual: Any,
     atol: float,
     rtol: float,
     max_samples: int = 8,
 ) -> List[str]:
-    """Return a list of human-friendly lines describing how `expected` and
-    `actual` differ. Handles torch tensors, numpy arrays, lists/tuples, and
-    falls back to repr() for other types.
-    """
-    actual = _unwrap_list_tuple(actual)
-
+    """Human-readable diff lines for one mismatching output."""
+    actual = _unwrap(actual)
     prefix = f"{name}:"
-    lines: List[str] = []
-    try:
-        if expected is None and actual is None:
-            lines.append(f"{prefix} both None")
-            return lines
-        if expected is None or actual is None:
-            lines.append(
-                f"{prefix} expected is {type(expected).__name__}, "
-                f"actual is {type(actual).__name__}"
-            )
-            lines.append(f"  expected={repr(expected)}")
-            lines.append(f"  actual={repr(actual)}")
-            return lines
+    if expected is None or actual is None:
+        return [
+            f"{prefix} expected is {type(expected).__name__}, "
+            f"actual is {type(actual).__name__}",
+            f"  expected={expected!r}",
+            f"  actual={actual!r}",
+        ]
 
-        # Torch tensors: move to CPU and compute element-wise diagnostics.
-        if _TORCH_AVAILABLE and hasattr(expected, "to") and hasattr(actual, "to"):
-            e = _to_cpu(expected)
-            a = _to_cpu(actual)
+    if _HAS_TORCH and hasattr(expected, "to") and hasattr(actual, "to"):
+        return _describe_tensor_mismatch(prefix, expected, actual, atol, rtol, max_samples)
 
-            try:
-                numel = int(e.numel())
-            except Exception:
-                try:
-                    numel = int(e.reshape(-1).numel())
-                except Exception:
-                    numel = 0
-
-            try:
-                # Check if both tensors are integer types
-                is_integer = not torch.is_floating_point(e) and not torch.is_floating_point(a)
-
-                if is_integer:
-                    # For integers: exact comparison
-                    ne_mask = e != a
-                    n_mismatch = int(ne_mask.reshape(-1).sum().item())
-                    pct = (n_mismatch / numel * 100.0) if numel > 0 else 0.0
-                    lines.append(
-                        f"{prefix} torch tensor mismatch: {n_mismatch}/{numel} elements "
-                        f"({pct:.3f}%) not equal"
-                    )
-                    mask = ne_mask
-                else:
-                    # For floats: convert if needed and use tolerance-based comparison
-                    if not torch.is_floating_point(e):
-                        e = e.float()
-                    if not torch.is_floating_point(a):
-                        a = a.float()
-                    n_mismatch, max_abs, mean_abs, pct, mask = _compute_mismatch_stats(
-                        e, a, numel, atol, rtol
-                    )
-                    lines.append(
-                        f"{prefix} torch tensor mismatch: {n_mismatch}/{numel} elements "
-                        f"({pct:.3f}%) outside tolerance (atol={atol}, rtol={rtol})"
-                    )
-                    lines.append(f"  max_abs_diff={max_abs:.6g}, mean_abs_diff={mean_abs:.6g}")
-
-                if n_mismatch > 0:
-                    idx = torch.nonzero(mask.reshape(-1), as_tuple=False).flatten()
-                    show_idx = idx[:max_samples].tolist()
-                    for j in show_idx:
-                        ev = e.reshape(-1)[j].item()
-                        av = a.reshape(-1)[j].item()
-                        if is_integer:
-                            lines.append(f"  idx={j}: expected={ev}, actual={av}")
-                        else:
-                            lines.append(
-                                f"  idx={j}: expected={ev}, actual={av}, diff={abs(ev - av):.6g}"
-                            )
-                    if n_mismatch > max_samples:
-                        lines.append(f"  ... and {n_mismatch - max_samples} more mismatches")
-                # small previews
-                if numel > 0:
-                    preview_n = min(8, numel)
-                    try:
-                        e_preview = e.reshape(-1)[:preview_n].tolist()
-                        a_preview = a.reshape(-1)[:preview_n].tolist()
-                        lines.append(f"  preview expected[:{preview_n}] = {e_preview}")
-                        lines.append(f"  preview actual[:{preview_n}] = {a_preview}")
-                    except Exception:
-                        pass
-                return lines
-            except Exception as ex:
-                lines.append(f"{prefix} tensor comparison error: {ex}")
-                return lines
-
-        # Numpy arrays
-        try:
-            import numpy as np
-
-            if isinstance(expected, np.ndarray) or isinstance(actual, np.ndarray):
-                e = expected if isinstance(expected, np.ndarray) else np.array(expected)
-                a = actual if isinstance(actual, np.ndarray) else np.array(actual)
-                numel = int(e.size)
-                is_close = np.isclose(e, a, atol=atol, rtol=rtol)
-                mask = ~is_close
-                n_mismatch = int(mask.reshape(-1).sum())
-                max_abs = float(np.max(np.abs(e - a))) if numel > 0 else float("nan")
-                mean_abs = float(np.mean(np.abs(e - a))) if numel > 0 else float("nan")
-                pct = (n_mismatch / numel * 100.0) if numel > 0 else 0.0
-                lines.append(
-                    f"{prefix} numpy array mismatch: {n_mismatch}/{numel} elements "
-                    f"({pct:.3f}%) outside tolerance (atol={atol}, rtol={rtol})"
-                )
-                lines.append(f"  max_abs_diff={max_abs:.6g}, mean_abs_diff={mean_abs:.6g}")
-                if n_mismatch > 0:
-                    idxs = np.nonzero(mask.reshape(-1))[0][:max_samples]
-                    for j in idxs:
-                        ev = float(e.reshape(-1)[j])
-                        av = float(a.reshape(-1)[j])
-                        lines.append(
-                            f"  idx={j}: expected={ev}, actual={av}, diff={abs(ev - av):.6g}"
-                        )
-                    if n_mismatch > max_samples:
-                        lines.append(f"  ... and {n_mismatch - max_samples} more mismatches")
-                preview_n = min(8, numel)
-                try:
-                    lines.append(
-                        f"  preview expected[:{preview_n}] = {e.reshape(-1)[:preview_n].tolist()}"
-                    )
-                    lines.append(
-                        f"  preview actual[:{preview_n}] = {a.reshape(-1)[:preview_n].tolist()}"
-                    )
-                except Exception:
-                    pass
-                return lines
-        except Exception:
-            # numpy not available or conversion failed; fallthrough
-            pass
-
-        # Lists/tuples
-        if isinstance(expected, (list, tuple)) or isinstance(actual, (list, tuple)):
-            exp_list = list(expected) if isinstance(expected, (list, tuple)) else [expected]
-            act_list = list(actual) if isinstance(actual, (list, tuple)) else [actual]
-            lines.append(
-                f"{prefix} list/tuple mismatch: len(expected)={len(exp_list)}, "
-                f"len(actual)={len(act_list)}"
-            )
-            nshow = min(max_samples, len(exp_list), len(act_list))
-            for i in range(nshow):
-                if exp_list[i] != act_list[i]:
-                    lines.append(f"  idx={i}: expected={exp_list[i]!r}, actual={act_list[i]!r}")
-            if len(exp_list) != len(act_list):
-                lines.append(
-                    f"  extra expected tail={exp_list[nshow:]}, "
-                    f"extra actual tail={act_list[nshow:]}"
-                )
-            return lines
-
-        # Fallback: show reprs
-        lines.append(f"{prefix} values differ")
-        lines.append(f"  expected={repr(expected)}")
-        lines.append(f"  actual={repr(actual)}")
+    if isinstance(expected, (list, tuple)) or isinstance(actual, (list, tuple)):
+        exp = list(expected) if isinstance(expected, (list, tuple)) else [expected]
+        act = list(actual) if isinstance(actual, (list, tuple)) else [actual]
+        lines = [f"{prefix} sequence mismatch: len(expected)={len(exp)}, len(actual)={len(act)}"]
+        for index in range(min(max_samples, len(exp), len(act))):
+            if exp[index] != act[index]:
+                lines.append(f"  idx={index}: expected={exp[index]!r}, actual={act[index]!r}")
         return lines
-    except Exception as exc:
-        return [f"{prefix} error collecting mismatch details: {exc}"]
+
+    return [f"{prefix} values differ", f"  expected={expected!r}", f"  actual={actual!r}"]
 
 
-def run_single_challenge(
-    challenge_path: Path,
-    frameworks: List[str],
-    test_kind: str,
-    index: Optional[int] = None,
-    repeat: int = 1,
-    warmup: int = 0,
-) -> int:
-    """Run a single challenge for the given frameworks."""
-    # Check if we're in summary mode (from environment variable)
-    show_details = os.environ.get("RUN_LOCAL_SUMMARY_MODE") != "1"
-    challenge_py = challenge_path / "challenge.py"
-    if not challenge_py.exists():
-        logger.error("No challenge.py found in %s", challenge_path)
-        return 2
-
-    challenge = load_module_from_path("challenge", challenge_py)
-    if not hasattr(challenge, "Challenge"):
-        logger.error("challenge.py has no `Challenge` class")
-        return 2
-    inst = challenge.Challenge()
-
-    tests = normalize_tests(inst, test_kind)
-    if index is not None:
-        tests = [tests[index]]
-
-    overall_exit = 0
-    for framework in frameworks:
+def _describe_tensor_mismatch(
+    prefix: str,
+    expected: Any,
+    actual: Any,
+    atol: float,
+    rtol: float,
+    max_samples: int,
+) -> List[str]:
+    def to_cpu(tensor: Any) -> Any:
         try:
-            solution_path = find_solution_file(challenge_path, framework)
-        except FileNotFoundError:
-            logger.error("No solution found for framework '%s' in %s", framework, challenge_path)
-            overall_exit = 2
+            return tensor.detach().cpu()
+        except Exception:
+            return tensor.cpu()
+
+    exp, act = to_cpu(expected), to_cpu(actual)
+    try:
+        numel = int(exp.numel())
+    except Exception:
+        return [f"{prefix} expected has no numel(); types differ from actual"]
+
+    lines: List[str] = []
+    integer = not torch.is_floating_point(exp) and not torch.is_floating_point(act)
+    try:
+        if integer:
+            mask = exp != act
+            mismatches = int(mask.reshape(-1).sum().item())
+            ratio = mismatches / numel * 100.0 if numel else 0.0
+            lines.append(f"{prefix} {mismatches}/{numel} elements ({ratio:.3f}%) not equal")
+        else:
+            if not torch.is_floating_point(exp):
+                exp = exp.float()
+            if not torch.is_floating_point(act):
+                act = act.float()
+            mask = ~torch.isclose(exp, act, atol=atol, rtol=rtol)
+            mismatches = int(mask.reshape(-1).sum().item())
+            ratio = mismatches / numel * 100.0 if numel else 0.0
+            lines.append(
+                f"{prefix} {mismatches}/{numel} elements ({ratio:.3f}%) "
+                f"outside tolerance (atol={atol}, rtol={rtol})"
+            )
+            if numel:
+                diff = (exp - act).abs()
+                lines.append(
+                    f"  max_abs_diff={float(diff.max().item()):.6g}, "
+                    f"mean_abs_diff={float(diff.mean().item()):.6g}"
+                )
+
+        if mismatches:
+            for index in torch.nonzero(mask.reshape(-1)).flatten()[:max_samples].tolist():
+                exp_value = exp.reshape(-1)[index].item()
+                act_value = act.reshape(-1)[index].item()
+                if integer:
+                    lines.append(f"  idx={index}: expected={exp_value}, actual={act_value}")
+                else:
+                    lines.append(
+                        f"  idx={index}: expected={exp_value}, actual={act_value}, "
+                        f"diff={abs(exp_value - act_value):.6g}"
+                    )
+            if mismatches > max_samples:
+                lines.append(f"  ... and {mismatches - max_samples} more mismatches")
+    except Exception as exc:
+        return [f"{prefix} tensor comparison failed: {exc}"]
+
+    if numel:
+        preview = min(max_samples, numel)
+        lines.append(f"  preview expected[:{preview}] = {exp.reshape(-1)[:preview].tolist()}")
+        lines.append(f"  preview actual[:{preview}] = {act.reshape(-1)[:preview].tolist()}")
+    return lines
+
+
+# ── one challenge ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class Options:
+    test: str = "example"
+    case: Optional[int] = None
+    repeat: int = 1
+    warmup: int = 0
+    summary: bool = False
+
+
+def run_challenge(
+    challenge: Challenge, frameworks: List[Framework], options: Options, stray_is_error: bool
+) -> int:
+    """Run one challenge for every requested framework; returns a process exit code."""
+    out_keys = challenge.output_keys()
+    try:
+        tests = challenge.tests(options.test)
+    except Exception as exc:
+        logger.error("Cannot generate '%s' tests for %s: %s", options.test, challenge.label, exc)
+        return 2
+    if options.case is not None:
+        if not 0 <= options.case < len(tests):
+            logger.error(
+                "--case %d out of range: '%s' has %d case(s) for %s",
+                options.case,
+                challenge.label,
+                len(tests),
+                options.test,
+            )
+            return 2
+        tests = [tests[options.case]]
+
+    exit_code = 0
+    for framework in frameworks:
+        solution = challenge.solution(framework)
+        if solution is None:
+            expected = challenge.directory / "solution" / framework.solution_file
+            if stray_is_error:
+                logger.error(
+                    "No %s solution for %s (expected %s)", framework.name, challenge.label, expected
+                )
+                exit_code = max(exit_code, 2)
+            else:
+                logger.info(
+                    "%-28s %sSKIPPED%s (no %s solution)",
+                    challenge.label,
+                    YELLOW,
+                    RESET,
+                    framework.name,
+                )
+            continue
+        exit_code = max(
+            exit_code, _run_framework(challenge, framework, solution, tests, out_keys, options)
+        )
+    return exit_code
+
+
+def _output_depends_on_buffer(
+    runner: Runner,
+    case: Dict[str, Any],
+    outputs: Dict[str, Any],
+    out_keys: List[str],
+) -> bool:
+    """True if calling solve() again on the same buffers changes the outputs.
+
+    The platform hands solve() uninitialized output buffers, so a kernel that accumulates
+    with atomicAdd (instead of zeroing first, or instead of overwriting) only produces the
+    right answer by luck. Re-running on the already-written buffers makes that dependence
+    deterministic instead of flaky.
+    """
+    before = {key: _clone_value(outputs[key]) for key in out_keys if key in outputs}
+    if not before:
+        return False
+    try:
+        runner.run(case)
+    except Exception:
+        return False
+    return any(
+        not outputs_match(value, outputs.get(key), 0.0, 0.0) for key, value in before.items()
+    )
+
+
+def _run_framework(
+    challenge: Challenge,
+    framework: Framework,
+    solution: Path,
+    tests: List[Dict[str, Any]],
+    out_keys: List[str],
+    options: Options,
+) -> int:
+    try:
+        runner = make_runner(framework, solution, challenge)
+    except Exception as exc:
+        logger.error("%s: cannot prepare %s solution: %s", challenge.label, framework.name, exc)
+        return 1
+
+    failures = 0
+    if not options.summary:
+        logger.info("Running %s | %s | %s", challenge.label, framework.name, options.test)
+        logger.info(
+            "%-7s %-7s %-10s %12s %12s %9s", "case", "status", "outputs", "ref", "solution", "delta"
+        )
+        logger.info("-" * 66)
+
+    for index, raw_case in enumerate(tests, start=1):
+        try:
+            base = materialize(raw_case, challenge.device)
+            # Correctness: one invocation each, on fresh buffers, so accumulating
+            # kernels are judged on a single call rather than on warmup + repeats.
+            expected = reference_outputs(challenge, clone_case(base), out_keys)
+            solution_case = clone_case(base)
+            actual = runner.run(solution_case)
+            ref_times = time_calls(
+                lambda case: challenge.instance.reference_impl(**case),
+                clone_case(base),
+                options.warmup,
+                options.repeat,
+            )
+            sol_times = time_calls(runner.run, clone_case(base), options.warmup, options.repeat)
+        except Exception as exc:
+            logger.error("%s: case %d/%d failed: %s", challenge.label, index, len(tests), exc)
+            failures += 1
             continue
 
-        # Preload python solution module once for Python frameworks
-        solution_mod: Optional[types.ModuleType] = None
-        if framework not in ("cuda", "cutlass"):
-            try:
-                solution_mod = load_module_from_path("solution_module", solution_path)
-            except Exception:
-                solution_mod = None
-
-        # timing accumulators (per-framework)
-        ref_times: List[float] = []
-        solution_times: List[float] = []
-
-        if framework in ("cuda", "cutlass") and (repeat > 1 or warmup > 0):
-            logger.info(
-                "CUDA framework: compiling .cu solution once per test and reusing it "
-                "for repeated runs."
-            )
-
-        overall_ok_framework = True
-        # Print table header for concise, aligned output
-        logger.info("Running framework: %s", framework)
-        if tests:
-            logger.info(
-                "%-8s %-8s %-8s %13s %13s %9s",
-                "Test",
-                "Status",
-                "Checked",
-                "Ref",
-                "Solution",
-                "Delta",
-            )
-            logger.info("-" * 64)
-
-        for i, test_case in enumerate(tests):
-
-            # materialise placeholder tensors (RandnTensor, OutTensor, etc.) then clone
-            test_case = _materialize_case(test_case, getattr(inst, "device", "cuda"))
-            ref_case = _clone_case(test_case)
-            solution_case = _clone_case(test_case)
-
-            # First-call effects (torch dispatch warm-up, CuTeDSL tracing, allocator growth)
-            # would otherwise be charged to the measurement and the two columns would be
-            # warmed differently. The grading backend prepares/warms before timing, so run at
-            # least one untimed iteration for both the reference and the solution.
-            try:
-
-                def _ref_call(tmp: Dict[str, Any]) -> Dict[str, Any]:
-                    inst.reference_impl(**tmp)
-                    return tmp
-
-                ref_local_times, measured_ref_case = _run_with_warmup_and_measure(
-                    _ref_call, test_case, max(warmup, 1), repeat
-                )
-                ref_times.extend(ref_local_times)
-                ref_case = (
-                    measured_ref_case if measured_ref_case is not None else _clone_case(test_case)
-                )
-            except Exception as e:
-                logger.error("Reference implementation failed: %s", e)
-                overall_ok_framework = False
-                continue
-
-            # Run solution: compile once (CUDA/CUTLASS), warmup, then measured repeats
-            try:
-                compiled_lib = None
-                if framework in ("cuda", "cutlass"):
-                    compile_fn = (
-                        compile_cutlass_shared if framework == "cutlass" else compile_cuda_shared
-                    )
-                    fw_label = "CUTLASS" if framework == "cutlass" else "CUDA"
-                    # compile once per test and reuse the library for warmup/repeats
-                    try:
-                        key = str(solution_path.resolve())
-                        compiled_lib = None
-                        if key in _cuda_lib_cache:
-                            cached_lib, cached_mtime = _cuda_lib_cache[key]
-                            if cached_mtime >= solution_path.stat().st_mtime:
-                                compiled_lib = cached_lib
-                        if compiled_lib is None:
-                            so = compile_fn(solution_path)
-                            compiled_lib = ctypes.CDLL(str(so))
-                            _cuda_lib_cache[key] = (compiled_lib, solution_path.stat().st_mtime)
-                    except Exception as e:
-                        logger.exception("Failed to compile %s solution: %s", fw_label, e)
-                        overall_ok_framework = False
-                        continue
-
-                # prepare runner callable
-                if framework in ("cuda", "cutlass"):
-                    # Capture current values to avoid late-binding issues
-                    _sol_path = solution_path
-                    _inst = inst
-                    _clib = compiled_lib
-
-                    def _cuda_runner(
-                        tmp: Dict[str, Any],
-                        _solution_path=_sol_path,
-                        _inst=_inst,
-                        _lib=_clib,
-                    ) -> Dict[str, Any]:
-                        return run_cuda_solution(_solution_path, tmp, _inst, lib=_lib)
-
-                    runner_callable = _cuda_runner
-                else:
-                    runner = solution_mod if solution_mod is not None else solution_path
-                    _fw = framework
-                    _runner = runner
-                    _inst = inst
-
-                    def _python_runner(
-                        tmp: Dict[str, Any],
-                        _runner=_runner,
-                        _framework=_fw,
-                        _inst=_inst,
-                    ) -> Dict[str, Any]:
-                        outs, _ = run_python_solution(_runner, _framework, tmp, _inst)
-                        return outs
-
-                    runner_callable = _python_runner
-
-                solution_local_times, measured_outs = _run_with_warmup_and_measure(
-                    runner_callable, test_case, max(warmup, 1), repeat
-                )
-                solution_times.extend(solution_local_times)
-                outs = measured_outs
-            except Exception as e:
-                logger.exception("Solution execution failed: %s", e)
-                overall_ok_framework = False
-                continue
-
-            # Determine which output to compare
-            try:
-                sig_map = inst.get_solve_signature()
-                out_keys = [k for k, v in sig_map.items() if v[1] in ("out", "inout")]
-            except Exception:
-                out_keys = []
-
-            # Compare outputs and print a concise per-test summary.
-            per_key_results: List[Tuple[str, bool]] = []
-            failure_details: List[str] = []
-
-            # Precompute lower-case maps for faster lookups
-            ref_lower_map = {k.lower(): v for k, v in ref_case.items()}
-            if isinstance(outs, dict):
-                out_lower_map = {k.lower(): v for k, v in outs.items()}
-            else:
-                out_lower_map = {}
-            solution_lower_map = {k.lower(): v for k, v in solution_case.items()}
-
-            # Capture maps via default args to avoid late-binding
-            def _find_expected(name: str, _ref_map=ref_lower_map):
-                return _ref_map.get(name.lower())
-
-            def _find_actual(
-                name: str,
-                _out_map=out_lower_map,
-                _solution_map=solution_lower_map,
+        details: List[str] = []
+        checked: List[str] = []
+        for key in out_keys or list(expected):
+            checked.append(key)
+            if not outputs_match(
+                expected.get(key), actual.get(key), challenge.atol, challenge.rtol
             ):
-                val = _out_map.get(name.lower())
-                if val is not None:
-                    return val
-                # fallback to solution_case
-                return _solution_map.get(name.lower())
+                details.extend(
+                    describe_mismatch(
+                        key, expected.get(key), actual.get(key), challenge.atol, challenge.rtol
+                    )
+                )
 
-            keys_to_check = out_keys or [list(ref_case.keys())[-1]]
-            for k in keys_to_check:
-                expected = _find_expected(k)
-                actual = _find_actual(k)
-
-                # If actual is a JAX array, try DLPack -> torch
-                actual = _jax_to_torch(actual)
-
-                ok = compare_tensors(expected, actual, inst.atol, inst.rtol)
-                per_key_results.append((k, ok))
-                if not ok:
-                    overall_ok_framework = False
-                    # collect richer debug info using helper
-                    try:
-                        details = get_mismatch_details(k, expected, actual, inst.atol, inst.rtol)
-                        if details:
-                            failure_details.extend(details)
-                        else:
-                            failure_details.append(f"{k}: mismatch")
-                    except Exception:
-                        failure_details.append(f"{k}: mismatch")
-
-            # compute per-test avg times
-            ref_avg = sum(ref_local_times) / len(ref_local_times) if ref_local_times else 0.0
-            solution_avg = (
-                sum(solution_local_times) / len(solution_local_times)
-                if solution_local_times
-                else 0.0
-            )
-
-            # compute percentage delta (solution vs reference)
-            delta = "-"
-            try:
-                if ref_avg > 0:
-                    pct = (solution_avg - ref_avg) / ref_avg * 100.0
-                    delta = f"{pct:+.2f}%"
-                else:
-                    delta = "N/A"
-            except Exception:
-                delta = "-"
-
-            # concise summary line
-            status = "PASSED" if all(ok for _, ok in per_key_results) else "FAILED"
-            checked = ",".join(k for k, _ in per_key_results)
+        if not options.summary:
+            ref_avg = sum(ref_times) / len(ref_times)
+            sol_avg = sum(sol_times) / len(sol_times)
+            delta = f"{(sol_avg - ref_avg) / ref_avg * 100.0:+.2f}%" if ref_avg > 0 else "N/A"
+            status = f"{GREEN}PASSED{RESET}" if not details else f"{RED}FAILED{RESET}"
             logger.info(
-                "%-8s %-8s %-8s %12.6fs %12.6fs %9s",
-                f"{i+1}/{len(tests)}",
+                "%-7s %-7s %-10s %11.6fs %11.6fs %9s",
+                f"{index}/{len(tests)}",
                 status,
-                checked,
+                ",".join(checked),
                 ref_avg,
-                solution_avg,
+                sol_avg,
                 delta,
             )
+        if details:
+            failures += 1
+            for line in details:
+                logger.error("  -> %s", line)
 
-            # print failure details when present
-            if failure_details and show_details:
-                for d in failure_details:
-                    logger.error("  -> %s", d)
+        # Checked last: it re-runs the solution, which mutates solution_case in place.
+        if _output_depends_on_buffer(runner, solution_case, actual, out_keys):
+            logger.warning(
+                "%s: output changes when solve() is called twice on the same buffers; the "
+                "output buffer is materialised uninitialized (torch.empty), so the kernel "
+                "must zero or fully overwrite it",
+                challenge.label,
+            )
 
-        if not overall_ok_framework:
-            overall_exit = max(overall_exit, 1)
-
-    return overall_exit
-
-
-def _visible_len(s: str) -> int:
-    """Return display width of a string, stripping ANSI escape codes."""
-    return len(re.sub(r"\x1b\[[0-9;]*m", "", s))
-
-
-def _print_cross_framework_table(
-    all_dirs: List[Path],
-    results: Dict[Path, Dict[str, str]],
-    frameworks: List[str],
-) -> None:
-    """Print a colorized ASCII table of challenge × framework results."""
-    labels = [f"{d.parent.name}/{d.name}" for d in all_dirs]
-    # column widths
-    label_width = max(len(label) for label in labels) if labels else 0
-    fw_widths = [max(len(fw), 6) for fw in frameworks]
-
-    # header
-    header_parts = [f"{'Challenge':<{label_width}}"]
-    for fw, w in zip(frameworks, fw_widths):
-        header_parts.append(f"{fw:^{w}}")
-    header = " | ".join(header_parts)
-    sep = "-+-".join(["-" * label_width] + ["-" * w for w in fw_widths])
-    print("\n" + header)
-    print(sep)
-
-    # rows
-    for d, label in zip(all_dirs, labels):
-        row_parts = [f"{label:<{label_width}}"]
-        for fw, w in zip(frameworks, fw_widths):
-            status = results.get(d, {}).get(fw, "SKIP")
-            if status == "PASS":
-                cell = f"{GREEN}{'PASS':^{w}}{RESET}"
-            elif status == "FAIL":
-                cell = f"{RED}{'FAIL':^{w}}{RESET}"
-            else:
-                cell = f"{YELLOW}{'SKIP':^{w}}{RESET}"
-            row_parts.append(cell)
-        print(" | ".join(row_parts))
-
-    # overall summary row
-    print(sep)
-    summary_parts = [f"{'Total':<{label_width}}"]
-    for fw, w in zip(frameworks, fw_widths):
-        total_pass = sum(1 for d in all_dirs if results.get(d, {}).get(fw) == "PASS")
-        total_fail = sum(1 for d in all_dirs if results.get(d, {}).get(fw) == "FAIL")
-        total_skip = sum(1 for d in all_dirs if results.get(d, {}).get(fw) in (None, "SKIP"))
-        txt = f"P:{total_pass} F:{total_fail} S:{total_skip}"
-        summary_parts.append(f"{txt:^{w}}")
-    print(" | ".join(summary_parts))
-
-    # cross-framework "at least one pass" row
-    cross_parts = [f"{'Any pass':<{label_width}}"]
-    any_pass = sum(
-        1 for d in all_dirs if any(results.get(d, {}).get(fw) == "PASS" for fw in frameworks)
-    )
-    any_pass_txt = f"{any_pass}/{len(all_dirs)}"
-    cross_parts.append(f"{any_pass_txt:^{fw_widths[0]}}")
-    cross_parts.extend([" " * w for w in fw_widths[1:]])
-    print(" | ".join(cross_parts))
-    print()
+    if failures:
+        logger.error(
+            "%s: %d/%d case(s) failed on %s", challenge.label, failures, len(tests), framework.name
+        )
+        return 1
+    if options.summary:
+        logger.info(
+            "%-28s %sPASSED%s (%s, %d case(s))",
+            challenge.label,
+            GREEN,
+            RESET,
+            framework.name,
+            len(tests),
+        )
+    return 0
 
 
-def run_all_challenges(
-    args,
-    frameworks: List[str],
-) -> int:
-    """Run all challenges in batch mode by spawning subprocesses."""
-    # locate repository root relative to this script
-    repo_root = Path(__file__).resolve().parents[1]
-    challenges_root = repo_root / "challenges"
-    if not challenges_root.exists():
-        # fallback to current working directory
-        challenges_root = Path.cwd() / "challenges"
-    if not challenges_root.exists():
-        logger.error("Could not find challenges/ directory at %s", challenges_root)
-        return 2
+# ── target discovery ──────────────────────────────────────────────────────────
 
-    # collect challenge dirs: challenges/<difficulty>/<name>/ where challenge.py exists
-    all_dirs: List[Path] = []
-    for difficulty_dir in sorted(challenges_root.iterdir()):
-        if not difficulty_dir.is_dir():
+# Directories that never contain challenges but can be large to walk.
+_SKIP_DIRS = {"3rdparty", "__pycache__", "build", "dist", "node_modules"}
+
+
+def _challenges_under(path: Path, depth: int = 3) -> List[Path]:
+    """All challenge directories at or below `path` (challenges/<level>/<name>)."""
+    if (path / "challenge.py").exists():
+        return [path]
+    if depth == 0:
+        return []
+    found: List[Path] = []
+    for child in sorted(path.iterdir()):
+        if not child.is_dir() or child.name in _SKIP_DIRS or child.name.startswith("."):
             continue
-        for chdir in sorted(difficulty_dir.iterdir()):
-            if (chdir / "challenge.py").exists():
-                all_dirs.append(chdir)
+        found.extend(_challenges_under(child, depth - 1))
+    return found
 
-    # allow restricting by providing a difficulty name or a path
-    if args.challenge_path:
-        cp = args.challenge_path
-        # if cp points directly to a challenge dir, run only that
-        if cp.exists() and (cp / "challenge.py").exists():
-            all_dirs = [cp]
+
+def resolve_targets(paths: List[Path]) -> List[Path]:
+    """Expand each path into challenge directories, dropping duplicates."""
+    resolved: List[Path] = []
+    seen: set = set()
+    for path in paths:
+        if not path.exists():
+            raise FileNotFoundError(f"No such path: {path}")
+        candidates = _challenges_under(path)
+        if not candidates:
+            raise FileNotFoundError(f"No challenges found in {path}")
+        for candidate in candidates:
+            key = candidate.resolve()
+            if key not in seen:
+                seen.add(key)
+                resolved.append(candidate)
+    return resolved
+
+
+# ── batch driver ──────────────────────────────────────────────────────────────
+
+
+def run_batch(directories: List[Path], frameworks: List[Framework], options: Options) -> int:
+    """Run every directory for every framework in a child process, then summarise."""
+    width = max(len(_label(d)) for d in directories)
+    skipped: List[str] = []
+    failed: List[str] = []
+    passed = 0
+    work = [(framework, directory) for framework in frameworks for directory in directories]
+    done = 0
+
+    for framework, directory in work:
+        done += 1
+        if not (directory / "solution" / framework.solution_file).exists():
+            skipped.append(f"{_label(directory)} ({framework.name})")
+            logger.info(
+                "%-*s %sSKIPPED%s (no %s solution)",
+                width,
+                _label(directory),
+                YELLOW,
+                RESET,
+                framework.name,
+            )
+            continue
+        code, output = _spawn(directory, framework, options, width)
+        if code == 0:
+            passed += 1
+            logger.info(
+                "%-*s %sPASSED%s [%d/%d] %s",
+                width,
+                _label(directory),
+                GREEN,
+                RESET,
+                done,
+                len(work),
+                framework.name,
+            )
         else:
-            # check if user provided a difficulty name like 'easy'
-            cp_name = cp.name
-            if cp_name in ("easy", "medium", "hard"):
-                all_dirs = [d for d in all_dirs if d.parent.name == cp_name]
+            failed.append(f"{_label(directory)} ({framework.name})")
+            logger.info(
+                "%-*s %sFAILED%s [%d/%d] %s",
+                width,
+                _label(directory),
+                RED,
+                RESET,
+                done,
+                len(work),
+                framework.name,
+            )
+            if output:
+                sys.stderr.write(f"--- {_label(directory)} ({framework.name}) ---\n")
+                sys.stderr.write(output if output.endswith("\n") else output + "\n")
 
-    if not all_dirs:
-        logger.error("No challenges found under %s", challenges_root)
-        return 2
-
-    # Initialize cross-framework results
-    results: Dict[Path, Dict[str, str]] = {d: {} for d in all_dirs}
-
-    # Run requested frameworks one-by-one.
-    failures: List[Tuple[Path, int]] = []
-    total_run = 0
-    total_work = len(frameworks) * len(all_dirs)
-    completed = 0
-    for framework in frameworks:
-        logger.info("Running framework: %s", framework)
-        # Filter out challenges that don't have a solution for this framework.
-        valid_dirs: List[Path] = []
-        skipped_dirs: List[Path] = []
-        for d in all_dirs:
-            try:
-                find_solution_file(d, framework)
-                valid_dirs.append(d)
-            except FileNotFoundError:
-                skipped_dirs.append(d)
-                results[d][framework] = "SKIP"
-            except ValueError:
-                logger.error("Unsupported framework: %s", framework)
-                return 2
-
-        # Compute a consistent label column width for aligned summary output.
-        label_width = 0
-        if args.summary or args.cross_framework_table:
-            try:
-                all_labels = [f"{d.parent.name}/{d.name}" for d in (valid_dirs + skipped_dirs)]
-                label_width = max(len(name) for name in all_labels) if all_labels else 0
-            except Exception:
-                label_width = 0
-
-        if skipped_dirs and not args.cross_framework_table:
-            skipped_labels = [f"{d.parent.name}/{d.name}" for d in skipped_dirs]
-            for label in skipped_labels:
-                logger.info("%-*s | %sSKIPPED%s", label_width, label, YELLOW, RESET)
-
-        if skipped_dirs and args.cross_framework_table:
-            for d in skipped_dirs:
-                completed += 1
-                label = f"{d.parent.name}/{d.name}"
-                logger.info(
-                    "Progress %d/%d | %s %s -> SKIP",
-                    completed,
-                    total_work,
-                    framework,
-                    label,
-                )
-
-        for ch in valid_dirs:
-            total_run += 1
-            label = f"{ch.parent.name}/{ch.name}"
-            cmd = [
-                sys.executable,
-                str(Path(__file__)),
-                str(ch),
-                "--framework",
-                framework,
-                "--test",
-                args.test,
-            ]
-            if args.index is not None:
-                cmd += ["--index", str(args.index)]
-            if args.repeat is not None:
-                cmd += ["--repeat", str(args.repeat)]
-            if args.warmup is not None:
-                cmd += ["--warmup", str(args.warmup)]
-
-            # Set environment variable to indicate summary mode
-            env = os.environ.copy()
-            if args.summary or args.cross_framework_table:
-                env["RUN_LOCAL_SUMMARY_MODE"] = "1"
-
-            # When cross-framework table is requested, always run in summary mode
-            # (capture output) and suppress per-challenge logs.
-            use_summary = args.summary or args.cross_framework_table
-
-            # Summary mode: capture full output and print only a compact summary
-            if use_summary:
-                try:
-                    proc = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        env=env,
-                    )
-                except Exception as e:
-                    if not args.cross_framework_table:
-                        logger.info("Failed to start subprocess for %s: %s", ch, e)
-                    results[ch][framework] = "FAIL"
-                    failures.append((ch, 1))
-                    completed += 1
-                    if args.cross_framework_table:
-                        logger.info(
-                            "Progress %d/%d | %s %s -> FAIL (spawn error)",
-                            completed,
-                            total_work,
-                            framework,
-                            label,
-                        )
-                    continue
-
-                _, _ = proc.communicate()
-                rc = proc.returncode
-                completed += 1
-                if not args.cross_framework_table:
-                    display_w = max(label_width, len(label))
-                    if rc == 0:
-                        logger.info("%-*s | %sPASSED%s", display_w, label, GREEN, RESET)
-                    else:
-                        logger.info("%-*s | %sFAILED%s", display_w, label, RED, RESET)
-                if rc == 0:
-                    results[ch][framework] = "PASS"
-                    if args.cross_framework_table:
-                        logger.info(
-                            "Progress %d/%d | %s %s -> PASS",
-                            completed,
-                            total_work,
-                            framework,
-                            label,
-                        )
-                else:
-                    results[ch][framework] = "FAIL"
-                    failures.append((ch, rc))
-                    if args.cross_framework_table:
-                        logger.info(
-                            "Progress %d/%d | %s %s -> FAIL",
-                            completed,
-                            total_work,
-                            framework,
-                            label,
-                        )
-                continue
-
-            # Non-summary: stream and prefix child output lines
-            try:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    env=env,
-                )
-            except Exception as e:
-                logger.info("Failed to start subprocess for %s: %s", ch, e)
-                results[ch][framework] = "FAIL"
-                failures.append((ch, 1))
-                continue
-
-            # Stream and prefix child output lines
-            if proc.stdout is not None:
-                try:
-                    display_w = max(label_width, len(label))
-                    for raw in proc.stdout:
-                        line = raw.rstrip("\n")
-                        if line.strip() == "":
-                            continue
-                        logger.info("%-*s | %s", display_w, label, line)
-                except Exception:
-                    # fallback to waiting if streaming failed
-                    pass
-
-            rc = proc.wait()
-            if rc == 0:
-                results[ch][framework] = "PASS"
-            else:
-                results[ch][framework] = "FAIL"
-                failures.append((ch, rc))
-
-    # Print cross-framework table if requested
-    if args.cross_framework_table:
-        _print_cross_framework_table(all_dirs, results, frameworks)
-
-    passed = total_run - len(failures)
-    logger.info("-" * 64)
+    logger.info("-" * 66)
     logger.info(
-        "Summary: %s%d passed%s, %s%d failed%s",
+        "Summary: %s%d passed%s, %s%d failed%s, %s%d skipped%s",
         GREEN,
         passed,
         RESET,
         RED,
-        len(failures),
+        len(failed),
+        RESET,
+        YELLOW,
+        len(skipped),
         RESET,
     )
-    return 1 if failures else 0
+    for label in failed:
+        logger.error("failed: %s", label)
+    for label in skipped:
+        logger.info("skipped: %s", label)
+    return 1 if failed else 0
 
 
-def main(argv: List[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run a challenge solution locally")
-    parser.add_argument(
-        "challenge_path",
-        type=Path,
-        nargs="?",
-        default=None,
-        help=(
-            "Path to challenge directory (optional when using --all-challenges). "
-            "When used with --all-challenges you may pass a difficulty name "
-            "('easy','medium','hard') or a path like 'challenges/easy' to limit "
-            "which challenges are run."
+def _label(directory: Path) -> str:
+    return f"{directory.parent.name}/{directory.name}"
+
+
+def _spawn(directory: Path, framework: Framework, options: Options, width: int) -> Tuple[int, str]:
+    """Run one (challenge, framework) pair in a child process."""
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        str(directory),
+        "--framework",
+        framework.name,
+        "--test",
+        options.test,
+        "--repeat",
+        str(options.repeat),
+        "--warmup",
+        str(options.warmup),
+    ]
+    if options.case is not None:
+        command.extend(["--case", str(options.case)])
+    if options.summary:
+        command.append("--summary")
+
+    if options.summary:
+        result = subprocess.run(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        return result.returncode, result.stdout
+
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    collected: List[str] = []
+    if process.stdout is not None:
+        for raw in process.stdout:
+            line = raw.rstrip("\n")
+            if line.strip():
+                logger.info("%-*s | %s", width, _label(directory), line)
+            collected.append(line)
+    return process.wait(), "\n".join(collected)
+
+
+# ── cli ───────────────────────────────────────────────────────────────────────
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="run_local.py",
+        description=(
+            "Run challenge solutions locally and diff them against reference_impl(). "
+            "Each positional argument is a path to a challenge directory or to a "
+            "directory searched recursively for challenges."
         ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples
+  # one challenge
+  python scripts/run_local.py challenges/easy/1_vector_add --framework pytorch
+
+  # every challenge inside a difficulty directory
+  python scripts/run_local.py challenges/easy --framework triton --test functional
+
+  # several directories / several frameworks
+  python scripts/run_local.py challenges/medium challenges/hard \\
+      --framework cuda cute
+
+  # a single case, timed 5x after 2 warmups, compact output
+  python scripts/run_local.py challenges/easy/1_vector_add --framework cuda \\
+      --test functional --case 1 --warmup 2 --repeat 5 --summary
+
+solutions
+  A challenge runs only if <challenge>/solution/solution.<framework> exists,
+  e.g. solution.pytorch.py, solution.triton.py, solution.cute.py, solution.cu,
+  solution.cutlass.cu. Challenges without it are SKIPPED; with a single target
+  a missing solution is an error instead.
+""",
     )
     parser.add_argument(
-        "--all-challenges",
-        action="store_true",
+        "targets",
+        nargs="+",
+        type=Path,
+        metavar="path",
         help=(
-            "Run all challenges under the repository 'challenges/' folder. "
-            "Optionally provide a difficulty name ('easy','medium','hard') or "
-            "a path as the positional `challenge_path` to limit which challenges are run."
+            "Challenge directory (e.g. challenges/easy/1_vector_add) or a directory "
+            "searched recursively for challenges (e.g. challenges/easy, challenges)."
         ),
     )
     parser.add_argument(
         "--framework",
+        "-f",
         required=True,
         nargs="+",
-        choices=["pytorch", "triton", "jax", "cuda", "cutlass", "cute", "tilelang", "mojo"],
-        help=(
-            "Framework(s) to run: provide one or more of "
-            "pytorch triton jax cuda cutlass cute tilelang mojo (space-separated)"
-        ),
+        choices=list(FRAMEWORKS),
+        metavar="FRAMEWORK",
+        help="One or more solutions to run, space-separated: " + ", ".join(FRAMEWORKS) + ".",
     )
     parser.add_argument(
         "--test",
+        "-t",
         default="example",
         choices=["example", "functional", "performance", "all"],
-        help="Which tests to run",
+        help=(
+            "Test suite to run (default: example). functional = correctness cases, "
+            "performance = the single large timed case, all = everything."
+        ),
     )
     parser.add_argument(
-        "--index",
+        "--case",
         type=int,
         default=None,
-        help="Run only the test at this index (0-based) from the selected set",
-    )
-    parser.add_argument(
-        "--repeat",
-        "-r",
-        type=int,
-        default=1,
-        help="Number of measured iterations to run per test (default: 1)",
+        metavar="N",
+        help="Run only case N (0-based) of the selected suite.",
     )
     parser.add_argument(
         "--warmup",
         "-w",
         type=int,
         default=0,
-        help="Number of warmup iterations before measured runs (default: 0)",
+        metavar="N",
+        help="Untimed warmup iterations before measuring (default: 0).",
+    )
+    parser.add_argument(
+        "--repeat",
+        "-r",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Measured iterations per case, averaged (default: 1).",
     )
     parser.add_argument(
         "--summary",
+        "-s",
         action="store_true",
         help=(
-            "Print compact per-challenge summaries during --all-challenges "
-            "(show output only on failures)"
+            "One PASS/FAIL line per challenge instead of the per-case table; "
+            "output of failing challenges is still printed."
         ),
     )
-    parser.add_argument(
-        "--cross-framework-table",
-        action="store_true",
-        dest="cross_framework_table",
-        help=(
-            "After running all frameworks, print a cross-framework completion table "
-            "(challenge rows × framework columns). Implies summary mode for each run."
-        ),
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    options = Options(
+        test=args.test,
+        case=args.case,
+        repeat=args.repeat,
+        warmup=args.warmup,
+        summary=args.summary,
     )
-    args = parser.parse_args(argv)
-    frameworks = args.framework
-
-    # If requested, run in batch mode
-    if args.all_challenges:
-        return run_all_challenges(args, frameworks)
-
-    # Non-batch mode: require a challenge_path
-    if not args.challenge_path:
-        logger.error("challenge_path is required when not using --all-challenges")
+    if options.repeat < 1 or options.warmup < 0:
+        logger.error("--repeat must be >= 1 and --warmup >= 0")
         return 2
 
-    return run_single_challenge(
-        args.challenge_path,
-        frameworks,
-        args.test,
-        args.index,
-        args.repeat,
-        args.warmup,
-    )
+    frameworks = [FRAMEWORKS[name] for name in dict.fromkeys(args.framework)]
+    try:
+        directories = resolve_targets(args.targets)
+    except FileNotFoundError as exc:
+        logger.error("%s", exc)
+        return 2
+
+    if len(directories) == 1:
+        try:
+            challenge = Challenge.load(directories[0])
+        except Exception as exc:
+            logger.error("Cannot load %s: %s", directories[0], exc)
+            return 2
+        return run_challenge(challenge, frameworks, options, stray_is_error=True)
+
+    return run_batch(directories, frameworks, options)
 
 
 if __name__ == "__main__":

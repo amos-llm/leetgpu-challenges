@@ -27,6 +27,7 @@ extern "C" void solve(const int* input, int* output, int N, int S, int E) {
     constexpr int kItemsPerThread = 4;
     constexpr int kItemsPerBlock = kBlockSize * kItemsPerThread;
     int grid_size = (E - S + 1 + kItemsPerBlock - 1) / kItemsPerBlock;
+    cudaMemset(output, 0, sizeof(int));
     sum<kBlockSize, kItemsPerThread><<<grid_size, kBlockSize>>>(input, output, N, S, E);
     cudaDeviceSynchronize();
 }

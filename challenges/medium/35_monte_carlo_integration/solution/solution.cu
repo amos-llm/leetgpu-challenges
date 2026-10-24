@@ -29,6 +29,7 @@ extern "C" void solve(const float* y_samples, float* result, float a, float b, i
     constexpr int kItemsPerThread = 4;
     constexpr int kItemsPerBlock = kBlockSize * kItemsPerThread;
     int grid_size = (n_samples + kItemsPerBlock - 1) / kItemsPerBlock;
+    cudaMemset(result, 0, sizeof(float));
     monte_carlo_kernel<kBlockSize, kItemsPerThread>
         <<<grid_size, kBlockSize>>>(y_samples, result, a, b, n_samples);
     cudaDeviceSynchronize();
