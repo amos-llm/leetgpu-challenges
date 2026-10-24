@@ -769,6 +769,21 @@ def run_challenge(
     return exit_code
 
 
+def _has_separate_output(challenge: Challenge) -> bool:
+    """True if the solve signature has a dedicated ``out`` buffer (not just ``inout``).
+
+    Only a separately allocated output can be handed to solve() uninitialized. A purely
+    in-place challenge (only ``inout`` buffers) has no such buffer: the output *is* the
+    input, so a second call legitimately transforms the already-transformed data, and a
+    non-idempotent op (reverse, color inversion, ...) would always look suspicious.
+    """
+    try:
+        signature = challenge.instance.get_solve_signature()
+    except Exception:
+        return False
+    return any(spec[1] == "out" for spec in signature.values())
+
+
 def _output_depends_on_buffer(
     runner: Runner,
     case: Dict[str, Any],
@@ -780,7 +795,8 @@ def _output_depends_on_buffer(
     The platform hands solve() uninitialized output buffers, so a kernel that accumulates
     with atomicAdd (instead of zeroing first, or instead of overwriting) only produces the
     right answer by luck. Re-running on the already-written buffers makes that dependence
-    deterministic instead of flaky.
+    deterministic instead of flaky. Only meaningful for challenges with a dedicated ``out``
+    buffer; see _has_separate_output().
     """
     before = {key: _clone_value(outputs[key]) for key in out_keys if key in outputs}
     if not before:
@@ -802,6 +818,7 @@ def _run_framework(
     out_keys: List[str],
     options: Options,
 ) -> int:
+    has_separate_output = _has_separate_output(challenge)
     try:
         runner = make_runner(framework, solution, challenge)
     except Exception as exc:
@@ -869,7 +886,9 @@ def _run_framework(
                 logger.error("  -> %s", line)
 
         # Checked last: it re-runs the solution, which mutates solution_case in place.
-        if _output_depends_on_buffer(runner, solution_case, actual, out_keys):
+        if has_separate_output and _output_depends_on_buffer(
+            runner, solution_case, actual, out_keys
+        ):
             logger.warning(
                 "%s: output changes when solve() is called twice on the same buffers; the "
                 "output buffer is materialised uninitialized (torch.empty), so the kernel "
