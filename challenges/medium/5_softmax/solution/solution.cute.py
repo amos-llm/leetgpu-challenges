@@ -25,19 +25,13 @@ def softmax_kernel(input: cute.Tensor, output: cute.Tensor, N: cute.Int32):
             local_max = other_max
 
     allocator = cutlass.utils.SmemAllocator()
-    smem = allocator.allocate_tensor(
-        cute.Float32,
-        cute.make_layout((NUM_WARPS,), stride=(1,)),
-    )
+    smem = allocator.allocate_array(cute.Float32, NUM_WARPS)
 
     if lane_id == 0:
         smem[warp_id] = local_max
     cute.arch.sync_threads()
 
-    block_max = allocator.allocate_tensor(
-        cute.Float32,
-        cute.make_layout((1,), stride=(1,)),
-    )
+    block_max = allocator.allocate_array(cute.Float32, 1)
     if tidx == 0:
         for i in range(NUM_WARPS):
             if smem[i] > local_max:
@@ -55,10 +49,7 @@ def softmax_kernel(input: cute.Tensor, output: cute.Tensor, N: cute.Int32):
         smem[warp_id] = local_sum
     cute.arch.sync_threads()
 
-    block_sum = allocator.allocate_tensor(
-        cute.Float32,
-        cute.make_layout((1,), stride=(1,)),
-    )
+    block_sum = allocator.allocate_array(cute.Float32, 1)
     if tidx == 0:
         sum = 0.0
         for i in range(NUM_WARPS):

@@ -38,14 +38,8 @@ def greedy_decoding_kernel(
             local_idx = other_idx
 
     allocator = cutlass.utils.SmemAllocator()
-    smem_max = allocator.allocate_tensor(
-        cutlass.Float32,
-        cute.make_layout((NUM_WARPS,), stride=(1,)),
-    )
-    smem_idx = allocator.allocate_tensor(
-        cutlass.Int32,
-        cute.make_layout((NUM_WARPS,), stride=(1,)),
-    )
+    smem_max = allocator.allocate_array(cutlass.Float32, NUM_WARPS)
+    smem_idx = allocator.allocate_array(cutlass.Int32, NUM_WARPS)
     if lane_idx == 0:
         smem_max[warp_idx] = local_max
         smem_idx[warp_idx] = local_idx
