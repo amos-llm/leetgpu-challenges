@@ -31,7 +31,7 @@ def reduce_kernel(input: cute.Tensor, output: cute.Tensor, N: cute.Int32):
         value += other_value
 
     allocator = cutlass.utils.SmemAllocator()
-    smem = allocator.allocate_array(cute.Float32, NUM_WARPS)
+    smem = allocator.allocate_tensor(cute.Float32, cute.make_layout(NUM_WARPS))
 
     if lane_id == 0:
         smem[warp_id] = value

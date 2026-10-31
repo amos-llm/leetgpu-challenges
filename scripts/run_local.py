@@ -34,6 +34,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -722,6 +723,13 @@ class Options:
     summary: bool = False
 
 
+def log_exc(message: str, *args: Any) -> None:
+    """Log the exception being handled together with its full traceback."""
+    if args:
+        message = message % args
+    logger.error("%s: %s\n%s", message, sys.exc_info()[1], traceback.format_exc().rstrip())
+
+
 def run_challenge(
     challenge: Challenge, frameworks: List[Framework], options: Options, stray_is_error: bool
 ) -> int:
@@ -729,8 +737,8 @@ def run_challenge(
     out_keys = challenge.output_keys()
     try:
         tests = challenge.tests(options.test)
-    except Exception as exc:
-        logger.error("Cannot generate '%s' tests for %s: %s", options.test, challenge.label, exc)
+    except Exception:
+        log_exc("Cannot generate '%s' tests for %s", options.test, challenge.label)
         return 2
     if options.case is not None:
         if not 0 <= options.case < len(tests):
@@ -828,8 +836,8 @@ def _run_framework(
     has_separate_output = _has_separate_output(challenge)
     try:
         runner = make_runner(framework, solution, challenge)
-    except Exception as exc:
-        logger.error("%s: cannot prepare %s solution: %s", challenge.label, framework.name, exc)
+    except Exception:
+        log_exc("%s: cannot prepare %s solution", challenge.label, framework.name)
         return 1
 
     failures = 0
@@ -855,8 +863,8 @@ def _run_framework(
                 options.repeat,
             )
             sol_times = time_calls(runner.run, clone_case(base), options.warmup, options.repeat)
-        except Exception as exc:
-            logger.error("%s: case %d/%d failed: %s", challenge.label, index, len(tests), exc)
+        except Exception:
+            log_exc("%s: case %d/%d failed", challenge.label, index, len(tests))
             failures += 1
             continue
 
@@ -1201,8 +1209,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if len(directories) == 1:
         try:
             challenge = Challenge.load(directories[0])
-        except Exception as exc:
-            logger.error("Cannot load %s: %s", directories[0], exc)
+        except Exception:
+            log_exc("Cannot load %s", directories[0])
             return 2
         return run_challenge(challenge, frameworks, options, stray_is_error=True)
 
