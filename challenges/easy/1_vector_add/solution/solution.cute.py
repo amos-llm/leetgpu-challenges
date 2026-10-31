@@ -1,72 +1,22 @@
-import cutlass
-from cutlass import cute
+import cutlass.cute as cute
 
 
 @cute.kernel
-def vector_add_kernel(
-    g_a: cute.Tensor,
-    g_b: cute.Tensor,
-    g_c: cute.Tensor,
-    c_c: cute.Tensor,
-    shape: cute.Shape,
-    thr_layout: cute.Layout,
-    val_layout: cute.Layout,
-    N: cute.Uint32,
-):
+def vector_add_kernel(A: cute.Tensor, B: cute.Tensor, C: cute.Tensor, N: cute.Int32):
     tidx, _, _ = cute.arch.thread_idx()
     bidx, _, _ = cute.arch.block_idx()
     bdim, _, _ = cute.arch.block_dim()
+
     idx = bidx * bdim + tidx
-
-    blk_coord = (None, bidx)
-    blk_a = g_a[blk_coord]
-    blk_b = g_b[blk_coord]
-    blk_c = g_c[blk_coord]
-    blk_crd = c_c[blk_coord]
-
-    copy_atom = cute.make_copy_atom(
-        cute.nvgpu.CopyUniversalOp(), g_a.element_type, num_bits_per_copy=128
-    )
-    tiled_copy = cute.make_tiled_copy_tv(copy_atom, thr_layout, val_layout)
-    thr_copy = tiled_copy.get_slice(tidx)
-    thr_a = thr_copy.partition_S(blk_a)
-    vector_size = cute.size(thr_a)
-    thr_b = thr_copy.partition_S(blk_b)
-    thr_c = thr_copy.partition_S(blk_c)
-    thr_crd = thr_copy.partition_S(blk_crd)
-    frg_a = cute.make_rmem_tensor_like(thr_a)
-    frg_b = cute.make_rmem_tensor_like(thr_b)
-    frg_c = cute.make_rmem_tensor_like(thr_c)
-    frg_pred = cute.make_rmem_tensor((1,), cutlass.Boolean)
-    frg_pred[0] = cute.elem_less(thr_crd[vector_size - 1], shape)
-
-    cute.copy(copy_atom, thr_a, frg_a, pred=frg_pred)
-    cute.copy(copy_atom, thr_b, frg_b, pred=frg_pred)
-    for i in range(cute.size(frg_c)):
-        frg_c[i] = frg_a[i] + frg_b[i]
-    cute.copy(copy_atom, frg_c, thr_c, pred=frg_pred)
-
-    if idx == N // vector_size:
-        for i in range(N & (~(vector_size - 1)), N):
-            g_c[i] = g_a[i] + g_b[i]
+    if idx < N:
+        C[idx] = A[idx] + B[idx]
 
 
 # A, B, C are tensors on the GPU
 @cute.jit
-def solve(A: cute.Tensor, B: cute.Tensor, C: cute.Tensor, N: cute.Uint32):
-    dtype = A.element_type
-    vector_size = 128 // dtype.width
-
-    thr_layout = cute.make_layout((128,))
-    val_layout = cute.make_layout((vector_size,))
-    tiler, tv_layout = cute.make_layout_tv(thr_layout, val_layout)
-
-    g_a = cute.zipped_divide(A, tiler)
-    g_b = cute.zipped_divide(B, tiler)
-    g_c = cute.zipped_divide(C, tiler)
-    id_c = cute.make_identity_tensor(C.shape)
-    c_c = cute.zipped_divide(id_c, tiler=tiler)
-    vector_add_kernel(g_a, g_b, g_c, c_c, C.shape, thr_layout, val_layout, N).launch(
-        grid=[cute.size(g_c, mode=[1]), 1, 1],
-        block=[cute.size(tv_layout, mode=[0]), 1, 1],
+def solve(A: cute.Tensor, B: cute.Tensor, C: cute.Tensor, N: cute.Int32):
+    threads_per_block = 256
+    vector_add_kernel(A, B, C, N).launch(
+        grid=[cute.ceil_div(N, threads_per_block), 1, 1],
+        block=[threads_per_block, 1, 1],
     )
