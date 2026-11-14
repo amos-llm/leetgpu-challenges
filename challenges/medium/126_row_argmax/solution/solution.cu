@@ -17,14 +17,14 @@ struct ReduceOp {
 };
 
 template <int kBlockSize>
-__global__ void greedy_decoding_kernel(const float* logits, int* tokens, int vocab_size) {
+__global__ void row_argmax_kernel(const float* logits, int* output, int V) {
     using BlockReduce = cub::BlockReduce<LogitId, kBlockSize>;
     __shared__ typename BlockReduce::TempStorage temp_storage;
 
     int batch_idx = blockIdx.x;
     LogitId local_max{-FLT_MAX, -1};
-    for (int i = threadIdx.x; i < vocab_size; i += blockDim.x) {
-        float logit = logits[batch_idx * vocab_size + i];
+    for (int i = threadIdx.x; i < V; i += blockDim.x) {
+        float logit = logits[batch_idx * V + i];
         if (logit > local_max.logit) {
             local_max.logit = logit;
             local_max.id = i;
@@ -32,13 +32,13 @@ __global__ void greedy_decoding_kernel(const float* logits, int* tokens, int voc
     }
     local_max = BlockReduce(temp_storage).Reduce(local_max, ReduceOp());
     if (threadIdx.x == 0) {
-        tokens[batch_idx] = local_max.id;
+        output[batch_idx] = local_max.id;
     }
 }
 
-// logits, tokens are device pointers (i.e. pointers to memory on the GPU)
-extern "C" void solve(const float* logits, int* tokens, int batch_size, int vocab_size) {
+// logits, output are device pointers
+extern "C" void solve(const float* logits, int* output, int B, int V) {
     const int kBlockSize = 256;
-    greedy_decoding_kernel<kBlockSize><<<batch_size, kBlockSize>>>(logits, tokens, vocab_size);
+    row_argmax_kernel<kBlockSize><<<B, kBlockSize>>>(logits, output, V);
     cudaDeviceSynchronize();
 }
