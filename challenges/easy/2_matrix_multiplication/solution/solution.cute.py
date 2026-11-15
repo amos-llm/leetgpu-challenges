@@ -163,7 +163,7 @@ def gemm_kernel(
                 tBsB[None, None, None, stage],
                 pred=tBpB,
             )
-            cute.arch.cp_async_commit_group()
+        cute.arch.cp_async_commit_group()
 
     for k_tile in range(num_k_tiles):
         next_k_tile = k_tile + NUM_STAGES - 1
@@ -180,10 +180,8 @@ def gemm_kernel(
                 tBsB[None, None, None, smem_pipe_write],
                 pred=tBpB,
             )
-            cute.arch.cp_async_commit_group()
-            cute.arch.cp_async_wait_group(NUM_STAGES - 1)
-        else:
-            cute.arch.cp_async_wait_group(0)
+        cute.arch.cp_async_commit_group()
+        cute.arch.cp_async_wait_group(NUM_STAGES - 1)
         cute.arch.sync_threads()
 
         cute.autovec_copy(tCsA[None, None, 0, smem_pipe_read], tCrA[None, None, 0])
@@ -211,6 +209,8 @@ def gemm_kernel(
 
         smem_pipe_read = (smem_pipe_read + 1) % NUM_STAGES
         smem_pipe_write = (smem_pipe_write + 1) % NUM_STAGES
+
+    cute.arch.cp_async_wait_group(0)
 
     for i in range(cute.size(tCcC)):
         m, n = tCcC[i]
