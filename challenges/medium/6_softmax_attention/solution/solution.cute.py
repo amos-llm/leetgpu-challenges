@@ -39,7 +39,7 @@ LOG2_E = 1.4426950408889634
 @cute.jit
 def reshape_acc_to_mn(acc: cute.Tensor):
     # SM80 accumulator: ((2, 2), MMA_M, MMA_N) -> ((2, MMA_M), (2, MMA_N)).
-    layout = cute.make_layout(acc.shape)
+    layout = acc.layout
     layout_mn = cute.make_layout(
         ((layout.shape[0][1], layout.shape[1]), (layout.shape[0][0], layout.shape[2])),
         stride=(
@@ -47,7 +47,7 @@ def reshape_acc_to_mn(acc: cute.Tensor):
             (layout.stride[0][0], layout.stride[2]),
         ),
     )
-    return cute.make_tensor(acc.iterator, cute.composition(acc.layout, layout_mn))
+    return cute.make_tensor(acc.iterator, layout_mn)
 
 
 @cute.jit

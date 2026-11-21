@@ -2,27 +2,21 @@ import cutlass
 import cutlass.cute as cute
 
 BM = 128
-BN = 128
-BK = 16
+BN = 64
+BK = 32
 THREADS = 256
-NUM_STAGES = 3
+NUM_STAGES = 2
 
 
 @cute.jit
-def load_fp32(src: cute.Tensor, dst: cute.Tensor):
-    for i in cutlass.range_constexpr(cute.size(dst)):
-        dst[i] = cute.Float32(src[i])
-
-
-@cute.jit
-def make_copy_predicates(coords: cute.Tensor, bound: cute.Int32):
+def make_copy_predicates(coords: cute.Tensor, bound: cutlass.Int32):
     pred = cute.make_rmem_tensor(
         (
             cute.size(coords, mode=[0, 1]),
             cute.size(coords, mode=[1]),
             cute.size(coords, mode=[2]),
         ),
-        cute.Boolean,
+        cutlass.Boolean,
     )
     pred_residue_k = cute.make_rmem_tensor_like(pred)
     for v in cutlass.range_constexpr(pred.shape[0]):
@@ -35,20 +29,24 @@ def make_copy_predicates(coords: cute.Tensor, bound: cute.Int32):
 
 
 @cute.kernel
-def batched_gemm_kernel(mA: cute.Tensor, mB: cute.Tensor, mC: cute.Tensor):
+def batched_gemm_kernel(
+    mA: cute.Tensor,
+    mB: cute.Tensor,
+    mC: cute.Tensor,
+):
     tidx, _, _ = cute.arch.thread_idx()
     bidx, bidy, bidz = cute.arch.block_idx()
 
-    tiled_copy_A = cute.make_tiled_copy_tv(
+    tiled_copy_g2s_A = cute.make_tiled_copy_tv(
         cute.make_copy_atom(
             cute.nvgpu.CopyUniversalOp(),
             mA.element_type,
             num_bits_per_copy=mA.element_type.width,
         ),
-        cute.make_layout((32, 8), stride=(8, 1)),
+        cute.make_layout((8, 32), stride=(32, 1)),
         cute.make_layout((1, 1)),
     )
-    tiled_copy_B = cute.make_tiled_copy_tv(
+    tiled_copy_g2s_B = cute.make_tiled_copy_tv(
         cute.make_copy_atom(
             cute.nvgpu.CopyUniversalOp(),
             mB.element_type,
@@ -58,30 +56,35 @@ def batched_gemm_kernel(mA: cute.Tensor, mB: cute.Tensor, mC: cute.Tensor):
         cute.make_layout((1, 1)),
     )
     tiled_mma = cute.make_tiled_mma(
-        cute.make_mma_atom(cute.nvgpu.MmaUniversalOp(cute.Float32)),
-        cute.make_layout((16, 16, 1), stride=(16, 1, 0)),
+        cutlass.cute.nvgpu.warp.MmaF16BF16Op(cute.Float16, cutlass.Float32, (16, 8, 16)),
+        cute.make_layout((2, 4, 1)),
+    )
+    tiled_copy_s2r_A = cute.make_tiled_copy_A(
+        cute.make_copy_atom(
+            cutlass.cute.nvgpu.warp.LdMatrix8x8x16bOp(False, 4),
+            mA.element_type,
+        ),
+        tiled_mma,
+    )
+    tiled_copy_s2r_B = cute.make_tiled_copy_B(
+        cute.make_copy_atom(
+            cutlass.cute.nvgpu.warp.LdMatrix8x8x16bOp(True, 2),
+            mB.element_type,
+        ),
+        tiled_mma,
     )
 
-    gA = cute.local_tile(mA[bidz, None, None], (BM, BK), (bidx, None))
-    gB = cute.local_tile(mB[bidz, None, None], (BN, BK), (bidy, None))
-    gC = cute.local_tile(mC[bidz, None, None], (BM, BN), (bidx, bidy))
-    cA = cute.local_tile(
-        cute.make_identity_tensor(mA[bidz, None, None].shape),
-        (BM, BK),
-        (bidx, None),
-    )
-    cB = cute.local_tile(
-        cute.make_identity_tensor(mB[bidz, None, None].shape),
-        (BN, BK),
-        (bidy, None),
-    )
-    cC = cute.local_tile(
-        cute.make_identity_tensor(mC[bidz, None, None].shape),
-        (BM, BN),
-        (bidx, bidy),
-    )
+    mA = mA[bidz, None, None]
+    mB = mB[bidz, None, None]
+    mC = mC[bidz, None, None]
+    gA = cute.local_tile(mA, (BM, BK), (bidx, None))
+    gB = cute.local_tile(mB, (BN, BK), (bidy, None))
+    gC = cute.local_tile(mC, (BM, BN), (bidx, bidy))
+    cA = cute.local_tile(cute.make_identity_tensor(mA.shape), (BM, BK), (bidx, None))
+    cB = cute.local_tile(cute.make_identity_tensor(mB.shape), (BN, BK), (bidy, None))
+    cC = cute.local_tile(cute.make_identity_tensor(mC.shape), (BM, BN), (bidx, bidy))
 
-    residue_k = mA.shape[2] - gA.shape[2] * BK
+    residue_k = mA.shape[1] - gA.shape[2] * BK
     gA = cute.domain_offset((0, residue_k, 0), gA)
     gB = cute.domain_offset((0, residue_k, 0), gB)
     cA = cute.domain_offset((0, residue_k, 0), cA)
@@ -97,14 +100,14 @@ def batched_gemm_kernel(mA: cute.Tensor, mB: cute.Tensor, mC: cute.Tensor):
         cute.make_layout((BN, BK, NUM_STAGES), stride=(1, BN, BN * BK)),
     )
 
-    thr_copy_A = tiled_copy_A.get_slice(tidx)
-    thr_copy_B = tiled_copy_B.get_slice(tidx)
-    tAgA = thr_copy_A.partition_S(gA)
-    tAcA = thr_copy_A.partition_S(cA)
-    tAsA = thr_copy_A.partition_D(sA)
-    tBgB = thr_copy_B.partition_S(gB)
-    tBcB = thr_copy_B.partition_S(cB)
-    tBsB = thr_copy_B.partition_D(sB)
+    thr_copy_g2s_A = tiled_copy_g2s_A.get_slice(tidx)
+    thr_copy_g2s_B = tiled_copy_g2s_B.get_slice(tidx)
+    tAgA = thr_copy_g2s_A.partition_S(gA)
+    tAcA = thr_copy_g2s_A.partition_S(cA)
+    tAsA = thr_copy_g2s_A.partition_D(sA)
+    tBgB = thr_copy_g2s_B.partition_S(gB)
+    tBcB = thr_copy_g2s_B.partition_S(cB)
+    tBsB = thr_copy_g2s_B.partition_D(sB)
 
     tAsA.fill(0)
     tBsB.fill(0)
@@ -121,17 +124,24 @@ def batched_gemm_kernel(mA: cute.Tensor, mB: cute.Tensor, mC: cute.Tensor):
     tCrC = tiled_mma.make_fragment_C(tCgC)
     tCrC.fill(0)
 
-    tApA, tApA_residue_k = make_copy_predicates(tAcA, mA.shape[1])
-    tBpB, tBpB_residue_k = make_copy_predicates(tBcB, mB.shape[1])
+    thr_copy_s2r_A = tiled_copy_s2r_A.get_slice(tidx)
+    thr_copy_s2r_B = tiled_copy_s2r_B.get_slice(tidx)
+    tCsA_copy_view = thr_copy_s2r_A.partition_S(sA)
+    tCsB_copy_view = thr_copy_s2r_B.partition_S(sB)
+    tCrA_copy_view = thr_copy_s2r_A.retile(tCrA)
+    tCrB_copy_view = thr_copy_s2r_B.retile(tCrB)
+
+    tApA, tApA_residue_k = make_copy_predicates(tAcA, mA.shape[0])
+    tBpB, tBpB_residue_k = make_copy_predicates(tBcB, mB.shape[0])
 
     cute.copy(
-        thr_copy_A,
+        thr_copy_g2s_A,
         tAgA[None, None, None, 0],
         tAsA[None, None, None, 0],
         pred=tApA_residue_k,
     )
     cute.copy(
-        thr_copy_B,
+        thr_copy_g2s_B,
         tBgB[None, None, None, 0],
         tBsB[None, None, None, 0],
         pred=tBpB_residue_k,
@@ -141,13 +151,13 @@ def batched_gemm_kernel(mA: cute.Tensor, mB: cute.Tensor, mC: cute.Tensor):
     for stage in cutlass.range_constexpr(1, NUM_STAGES - 1):
         if stage < num_k_tiles:
             cute.copy(
-                thr_copy_A,
+                thr_copy_g2s_A,
                 tAgA[None, None, None, stage],
                 tAsA[None, None, None, stage],
                 pred=tApA,
             )
             cute.copy(
-                thr_copy_B,
+                thr_copy_g2s_B,
                 tBgB[None, None, None, stage],
                 tBsB[None, None, None, stage],
                 pred=tBpB,
@@ -160,33 +170,42 @@ def batched_gemm_kernel(mA: cute.Tensor, mB: cute.Tensor, mC: cute.Tensor):
         next_k_tile = k_tile + NUM_STAGES - 1
         if next_k_tile < num_k_tiles:
             cute.copy(
-                thr_copy_A,
+                thr_copy_g2s_A,
                 tAgA[None, None, None, next_k_tile],
                 tAsA[None, None, None, smem_pipe_write],
                 pred=tApA,
             )
             cute.copy(
-                thr_copy_B,
+                thr_copy_g2s_B,
                 tBgB[None, None, None, next_k_tile],
                 tBsB[None, None, None, smem_pipe_write],
                 pred=tBpB,
             )
         cute.arch.sync_threads()
 
-        load_fp32(tCsA[None, None, 0, smem_pipe_read], tCrA[None, None, 0])
-        load_fp32(tCsB[None, None, 0, smem_pipe_read], tCrB[None, None, 0])
-
-        num_k_blocks = tCrA.shape[2]
+        num_k_blocks = cute.size(tCrA, mode=[2])
+        cute.copy(
+            tiled_copy_s2r_A,
+            tCsA_copy_view[None, None, 0, smem_pipe_read],
+            tCrA_copy_view[None, None, 0],
+        )
+        cute.copy(
+            tiled_copy_s2r_B,
+            tCsB_copy_view[None, None, 0, smem_pipe_read],
+            tCrB_copy_view[None, None, 0],
+        )
         for k_block in cutlass.range_constexpr(num_k_blocks, unroll_full=True):
             next_k_block = k_block + 1
-            if next_k_block < num_k_blocks:
-                load_fp32(
-                    tCsA[None, None, next_k_block, smem_pipe_read],
-                    tCrA[None, None, next_k_block],
+            if cutlass.const_expr(next_k_block < num_k_blocks):
+                cute.copy(
+                    tiled_copy_s2r_A,
+                    tCsA_copy_view[None, None, next_k_block, smem_pipe_read],
+                    tCrA_copy_view[None, None, next_k_block],
                 )
-                load_fp32(
-                    tCsB[None, None, next_k_block, smem_pipe_read],
-                    tCrB[None, None, next_k_block],
+                cute.copy(
+                    tiled_copy_s2r_B,
+                    tCsB_copy_view[None, None, next_k_block, smem_pipe_read],
+                    tCrB_copy_view[None, None, next_k_block],
                 )
             cute.gemm(
                 tiled_mma,
@@ -202,7 +221,7 @@ def batched_gemm_kernel(mA: cute.Tensor, mB: cute.Tensor, mC: cute.Tensor):
 
     for i in range(cute.size(tCcC)):
         m, n = tCcC[i]
-        if m < mC.shape[1] and n < mC.shape[2]:
+        if m < mC.shape[0] and n < mC.shape[1]:
             tCgC[i] = mC.element_type(tCrC[i])
 
 
@@ -212,24 +231,15 @@ def solve(
     A: cute.Tensor,
     B: cute.Tensor,
     C: cute.Tensor,
-    BATCH: cute.Int32,
-    M: cute.Int32,
-    N: cute.Int32,
-    K: cute.Int32,
+    BATCH: cutlass.Int32,
+    M: cutlass.Int32,
+    N: cutlass.Int32,
+    K: cutlass.Int32,
 ):
-    A = cute.make_tensor(
-        A.iterator,
-        cute.make_layout((BATCH, M, K), stride=(M * K, K, 1)),
-    )
-    B = cute.make_tensor(
-        B.iterator,
-        cute.make_layout((BATCH, N, K), stride=(K * N, 1, N)),
-    )
-    C = cute.make_tensor(
-        C.iterator,
-        cute.make_layout((BATCH, M, N), stride=(M * N, N, 1)),
-    )
-    batched_gemm_kernel(A, B, C).launch(
+    mA = cute.make_tensor(A.iterator, cute.make_layout((BATCH, M, K), stride=(M * K, K, 1)))
+    mB = cute.make_tensor(B.iterator, cute.make_layout((BATCH, N, K), stride=(K * N, 1, N)))
+    mC = cute.make_tensor(C.iterator, cute.make_layout((BATCH, M, N), stride=(M * N, N, 1)))
+    batched_gemm_kernel(mA, mB, mC).launch(
         grid=[cute.ceil_div(M, BM), cute.ceil_div(N, BN), BATCH],
         block=[THREADS, 1, 1],
     )
