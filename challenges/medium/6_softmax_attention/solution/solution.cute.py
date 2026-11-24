@@ -1,37 +1,23 @@
 import cutlass
 import cutlass.cute as cute
 
-M_BLOCK_SIZE = 16
-N_BLOCK_SIZE = 32
-NUM_THREADS = 128
-WARP_SIZE = 32
-LOG2_E = 1.4426950408889634
+BM = 16
+BN = 32
+THREADS = 128
+LOG2E = 1.4426950408889634
 
 
 @cute.jit
-def make_acc_mn_view(acc: cute.Tensor) -> cute.Tensor:
-    acc_layout = acc.layout
-    mn_layout = cute.make_layout(
-        ((acc_layout.shape[0], acc_layout.shape[1]), acc_layout.shape[2]),
-        stride=((acc_layout.stride[0], acc_layout.stride[1]), acc_layout.stride[2]),
-    )
-    return cute.make_tensor(acc.iterator, mn_layout)
-
-
-@cute.jit
-def copy_qkv_tile(
-    tiled_copy: cute.TiledCopy,
-    src: cute.Tensor,
-    dst: cute.Tensor,
+def make_copy_predicate(
     coords: cute.Tensor,
     seqlen: cutlass.Int32,
     head_dim: cutlass.Int32,
 ):
-    pred = cute.make_rmem_tensor(coords.shape, cutlass.Boolean)
+    pred = cute.make_rmem_tensor_like(coords, cutlass.Boolean)
     for i in cutlass.range_constexpr(cute.size(coords)):
-        row, col = coords[i]
-        pred[i] = row < seqlen and col < head_dim
-    cute.copy(tiled_copy, src, dst, pred=pred)
+        m, n = coords[i]
+        pred[i] = m < seqlen and n < head_dim
+    return pred
 
 
 @cute.kernel
@@ -44,139 +30,139 @@ def attention_kernel(
     seqlen_k: cutlass.Int32,
     head_dim: cutlass.Int32,
 ):
-    head_dim_padded = cute.ceil_div(mQ.shape[1], WARP_SIZE) * WARP_SIZE
     tidx, _, _ = cute.arch.thread_idx()
     m_block, _, _ = cute.arch.block_idx()
-    softmax_scale_log2 = (
-        cute.math.rsqrt(
-            cutlass.Float32(head_dim),
-            fastmath=True,
-        )
-        * LOG2_E
-    )
+    head_dim_pad = cute.ceil_div(mQ.shape[1], 32) * 32
+    scale_log2 = cute.math.rsqrt(cutlass.Float32(head_dim), fastmath=True) * LOG2E
 
     smem = cutlass.utils.SmemAllocator()
     sQ = smem.allocate_tensor(
         cutlass.Float32,
-        cute.make_layout(
-            (M_BLOCK_SIZE, head_dim_padded),
-            stride=(head_dim_padded + 1, 1),
-        ),
+        cute.make_layout((BM, head_dim_pad), stride=(head_dim_pad + 4, 1)),
     )
-    sKV_layout = cute.make_layout(
-        (N_BLOCK_SIZE, head_dim_padded),
-        stride=(head_dim_padded + 1, 1),
-    )
-    sK = smem.allocate_tensor(cutlass.Float32, sKV_layout)
-    sV = smem.allocate_tensor(cutlass.Float32, sKV_layout)
-    sP = smem.allocate_tensor(
+    sK = smem.allocate_tensor(
         cutlass.Float32,
-        cute.make_layout(
-            (M_BLOCK_SIZE, N_BLOCK_SIZE),
-            stride=(N_BLOCK_SIZE + 1, 1),
-        ),
+        cute.make_layout((BN, head_dim_pad), stride=(head_dim_pad + 4, 1)),
     )
+    sV = smem.allocate_tensor(cutlass.Float32, sK.layout)
     sVt = cute.make_tensor(
         sV.iterator,
-        cute.make_layout(
-            (head_dim_padded, N_BLOCK_SIZE),
-            stride=(1, sKV_layout.stride[0]),
-        ),
+        cute.make_layout((sV.shape[1], sV.shape[0]), stride=(sV.stride[1], sV.stride[0])),
+    )
+    sP = smem.allocate_tensor(
+        cutlass.Float32,
+        cute.make_layout((BM, BN), stride=(BN, 1)),
     )
 
-    copy_thread_layout = cute.make_layout(
-        (NUM_THREADS // WARP_SIZE, WARP_SIZE), stride=(WARP_SIZE, 1)
+    tiled_copy = cute.make_tiled_copy_tv(
+        cute.make_copy_atom(cute.nvgpu.cpasync.CopyG2SOp(), cutlass.Float32, num_bits_per_copy=32),
+        cute.make_layout((4, 32), stride=(32, 1)),
+        cute.make_layout((1, 1)),
     )
-    copy_value_layout = cute.make_layout((1, 1))
-    gmem_tiled_copy_QKV = cute.make_tiled_copy_tv(
-        cute.make_copy_atom(
-            cute.nvgpu.cpasync.CopyG2SOp(),
-            cutlass.Float32,
-            num_bits_per_copy=32,
-        ),
-        copy_thread_layout,
-        copy_value_layout,
-    )
-    gmem_thr_copy_QKV = gmem_tiled_copy_QKV.get_slice(tidx)
-    gQ = cute.local_tile(mQ, (M_BLOCK_SIZE, head_dim_padded), (m_block, 0))
-    cQ = cute.local_tile(
-        cute.make_identity_tensor(mQ.shape),
-        (M_BLOCK_SIZE, head_dim_padded),
-        (m_block, 0),
-    )
-    tQgQ = gmem_thr_copy_QKV.partition_S(gQ)
-    tQcQ = gmem_thr_copy_QKV.partition_S(cQ)
-    tQsQ = gmem_thr_copy_QKV.partition_D(sQ)
-    gK = cute.local_tile(mK, (N_BLOCK_SIZE, head_dim_padded), (None, 0))
-    gV = cute.local_tile(mV, (N_BLOCK_SIZE, head_dim_padded), (None, 0))
-    cKV = cute.local_tile(
-        cute.make_identity_tensor(mK.shape), (N_BLOCK_SIZE, head_dim_padded), (None, 0)
-    )
-    tKgK = gmem_thr_copy_QKV.partition_S(gK)
-    tVgV = gmem_thr_copy_QKV.partition_S(gV)
-    tKVcKV = gmem_thr_copy_QKV.partition_S(cKV)
-    tKsK = gmem_thr_copy_QKV.partition_D(sK)
-    tVsV = gmem_thr_copy_QKV.partition_D(sV)
-
+    thr_copy = tiled_copy.get_slice(tidx)
     tiled_mma = cute.make_tiled_mma(
         cute.make_mma_atom(cute.nvgpu.MmaUniversalOp(cutlass.Float32)),
         cute.make_layout(
-            (M_BLOCK_SIZE, NUM_THREADS // M_BLOCK_SIZE, 1),
-            stride=(NUM_THREADS // M_BLOCK_SIZE, 1, 0),
+            (BM, THREADS // BM, 1),
+            stride=(THREADS // BM, 1, 0),
         ),
     )
     thr_mma = tiled_mma.get_slice(tidx)
+
+    tQsQ = thr_copy.partition_D(sQ)
+    tKsK = thr_copy.partition_D(sK)
+    tVsV = thr_copy.partition_D(sV)
+    tQsQ.fill(0.0)
+    tKsK.fill(0.0)
+    tVsV.fill(0.0)
+
     tSsQ = thr_mma.partition_A(sQ)
+    tSrQ = thr_mma.make_fragment_A(tSsQ)
     tSsK = thr_mma.partition_B(sK)
+    tSrK = thr_mma.make_fragment_B(tSsK)
+
     tSsP = thr_mma.partition_C(sP)
     tOsP = thr_mma.partition_A(sP)
+    tOrP = thr_mma.make_fragment_A(tOsP)
     tOsVt = thr_mma.partition_B(sVt)
-    cS = cute.make_identity_tensor((M_BLOCK_SIZE, N_BLOCK_SIZE))
-    tScS = thr_mma.partition_C(cS)
-    tScS_mn = make_acc_mn_view(tScS)
-    acc_S = thr_mma.make_fragment_C(tSsP)
-    acc_shape_O = thr_mma.partition_shape_C((M_BLOCK_SIZE, head_dim_padded))
-    acc_O = thr_mma.make_fragment_C(acc_shape_O)
-    acc_O.fill(0.0)
+    tOrVt = thr_mma.make_fragment_B(tOsVt)
 
-    acc_S_mn = make_acc_mn_view(acc_S)
-    acc_O_mn = make_acc_mn_view(acc_O)
-    row_max = cute.make_rmem_tensor((cute.size(acc_O_mn.shape[0]),), cutlass.Float32)
+    gO = cute.local_tile(mO, (BM, head_dim_pad), (m_block, 0))
+    cO = cute.local_tile(cute.make_identity_tensor(mO.shape), (BM, head_dim_pad), (m_block, 0))
+    tOgO = thr_mma.partition_C(gO)
+    tOcO = thr_mma.partition_C(cO)
+    acc_O = thr_mma.make_fragment_C(tOgO)
+    acc_O.fill(0.0)
+    acc_O_mn = acc_O[0, None, None]
+
+    acc_S = cute.make_rmem_tensor(thr_mma.partition_shape_C((BM, BN)), cutlass.Float32)
+    acc_S.fill(0.0)
+    acc_S_mn = acc_S[0, None, None]
+    tScS_mn = thr_mma.partition_C(cute.make_identity_tensor((BM, BN)))[0, None, None]
+
+    num_rows = cute.size(acc_S_mn.shape[0])
+    row_max = cute.make_rmem_tensor((num_rows,), cutlass.Float32)
     row_max.fill(-cutlass.Float32.inf)
-    row_sum = cute.make_rmem_tensor((cute.size(acc_O_mn.shape[0]),), cutlass.Float32)
+    row_sum = cute.make_rmem_tensor_like(row_max)
     row_sum.fill(0.0)
-    copy_qkv_tile(gmem_tiled_copy_QKV, tQgQ, tQsQ, tQcQ, seqlen_q, head_dim)
-    copy_qkv_tile(
-        gmem_tiled_copy_QKV,
+
+    gQ = cute.local_tile(mQ, (BM, head_dim_pad), (m_block, 0))
+    cQ = cute.local_tile(cute.make_identity_tensor(mQ.shape), (BM, head_dim_pad), (m_block, 0))
+    gK = cute.local_tile(mK, (BN, head_dim_pad), (None, 0))
+    gV = cute.local_tile(mV, (BN, head_dim_pad), (None, 0))
+    cKV = cute.local_tile(cute.make_identity_tensor(mK.shape), (BN, head_dim_pad), (None, 0))
+    tQgQ = thr_copy.partition_S(gQ)
+    tQcQ = thr_copy.partition_S(cQ)
+    tKgK = thr_copy.partition_S(gK)
+    tVgV = thr_copy.partition_S(gV)
+    tKVcKV = thr_copy.partition_S(cKV)
+    cute.copy(
+        tiled_copy,
+        tQgQ,
+        tQsQ,
+        pred=make_copy_predicate(tQcQ, seqlen_q, head_dim),
+    )
+    cute.copy(
+        tiled_copy,
         tKgK[None, None, None, 0],
         tKsK,
-        tKVcKV[None, None, None, 0],
-        seqlen_k,
-        head_dim,
+        pred=make_copy_predicate(tKVcKV[None, None, None, 0], seqlen_k, head_dim),
     )
     cute.arch.cp_async_commit_group()
 
-    num_kv_tiles = cute.ceil_div(seqlen_k, N_BLOCK_SIZE)
+    num_kv_tiles = cute.ceil_div(seqlen_k, BN)
     for n_block in range(num_kv_tiles):
         cute.arch.cp_async_wait_group(0)
         cute.arch.sync_threads()
 
-        copy_qkv_tile(
-            gmem_tiled_copy_QKV,
+        cute.copy(
+            tiled_copy,
             tVgV[None, None, None, n_block],
             tVsV,
-            tKVcKV[None, None, None, n_block],
-            seqlen_k,
-            head_dim,
+            pred=make_copy_predicate(tKVcKV[None, None, None, n_block], seqlen_k, head_dim),
         )
         cute.arch.cp_async_commit_group()
 
         acc_S.fill(0.0)
-        tSrQ = thr_mma.make_fragment_A(tSsQ)
-        tSrK = thr_mma.make_fragment_B(tSsK)
-        for k_block in range(cute.size(tSsQ.shape[2]), unroll_full=True):
-            cute.autovec_copy(tSsQ[None, None, k_block], tSrQ[None, None, k_block])
-            cute.autovec_copy(tSsK[None, None, k_block], tSrK[None, None, k_block])
+        cute.autovec_copy(
+            tSsQ[None, None, 0],
+            tSrQ[None, None, 0],
+        )
+        cute.autovec_copy(
+            tSsK[None, None, 0],
+            tSrK[None, None, 0],
+        )
+        for k_block in cutlass.range_constexpr(cute.size(tSsQ.shape[2]), unroll_full=True):
+            next_k_block = k_block + 1
+            if cutlass.const_expr(next_k_block < cute.size(tSsQ.shape[2])):
+                cute.autovec_copy(
+                    tSsQ[None, None, next_k_block],
+                    tSrQ[None, None, next_k_block],
+                )
+                cute.autovec_copy(
+                    tSsK[None, None, next_k_block],
+                    tSrK[None, None, next_k_block],
+                )
             cute.gemm(
                 tiled_mma,
                 acc_S,
@@ -185,54 +171,67 @@ def attention_kernel(
                 acc_S,
             )
 
-        cute.arch.sync_threads()
         next_n_block = n_block + 1
         if next_n_block < num_kv_tiles:
-            copy_qkv_tile(
-                gmem_tiled_copy_QKV,
+            cute.arch.sync_threads()
+            cute.copy(
+                tiled_copy,
                 tKgK[None, None, None, next_n_block],
                 tKsK,
-                tKVcKV[None, None, None, next_n_block],
-                seqlen_k,
-                head_dim,
+                pred=make_copy_predicate(
+                    tKVcKV[None, None, None, next_n_block], seqlen_k, head_dim
+                ),
             )
         cute.arch.cp_async_commit_group()
 
-        for r in cutlass.range_constexpr(cute.size(row_max)):
-            for c in cutlass.range_constexpr(cute.size(tScS_mn.shape[1])):
-                if n_block * N_BLOCK_SIZE + tScS_mn[r, c][1] >= seqlen_k:
+        for r in cutlass.range_constexpr(cute.size(acc_S_mn.shape[0])):
+            for c in cutlass.range_constexpr(cute.size(acc_S_mn.shape[1])):
+                if n_block * BN + tScS_mn[r, c][1] >= seqlen_k:
                     acc_S_mn[r, c] = -cutlass.Float32.inf
 
-            acc_S_row = acc_S_mn[r, None].load()
-            row_max_cur = acc_S_row.reduce(cute.ReductionOp.MAX, -cutlass.Float32.inf, 0)
+            s = acc_S_mn[r, None].load()
+            row_max_cur = s.reduce(cute.ReductionOp.MAX, -cutlass.Float32.inf, 0)
             for offset in (4, 2, 1):
                 row_max_cur = cute.arch.fmax(
-                    row_max_cur, cute.arch.shuffle_sync_bfly(row_max_cur, offset)
+                    row_max_cur,
+                    cute.arch.shuffle_sync_bfly(row_max_cur, offset),
                 )
+            row_max_cur = cute.arch.fmax(row_max_cur, row_max[r])
 
-            row_max_prev = row_max[r]
-            row_max_cur = cute.arch.fmax(row_max_prev, row_max_cur)
-            row_scale = cute.math.exp2(
-                (row_max_prev - row_max_cur) * softmax_scale_log2, fastmath=True
-            )
-            acc_S_row_exp = cute.math.exp2(
-                (acc_S_row - row_max_cur) * softmax_scale_log2, fastmath=True
-            )
-            row_sum[r] = row_sum[r] * row_scale + acc_S_row_exp.reduce(cute.ReductionOp.ADD, 0.0, 0)
+            p = cute.math.exp2((s - row_max_cur) * scale_log2)
+            row_sum_cur = p.reduce(cute.ReductionOp.ADD, cutlass.Float32.zero, 0)
+            for offset in (4, 2, 1):
+                row_sum_cur = row_sum_cur + cute.arch.shuffle_sync_bfly(row_sum_cur, offset)
+
+            alpha = cute.math.exp2((row_max[r] - row_max_cur) * scale_log2)
+            row_sum[r] = row_sum[r] * alpha + row_sum_cur
             row_max[r] = row_max_cur
-            acc_O_mn[r, None] = acc_O_mn[r, None].load() * row_scale
-            acc_S_mn[r, None] = acc_S_row_exp
+            acc_S_mn[r, None] = p
+            acc_O_mn[r, None] = acc_O_mn[r, None].load() * alpha
 
         cute.autovec_copy(acc_S, tSsP)
-
         cute.arch.cp_async_wait_group(1)
         cute.arch.sync_threads()
 
-        tOrP = thr_mma.make_fragment_A(tOsP)
-        tOrVt = thr_mma.make_fragment_B(tOsVt)
-        for k_block in range(cute.size(tOsP.shape[2]), unroll_full=True):
-            cute.autovec_copy(tOsP[None, None, k_block], tOrP[None, None, k_block])
-            cute.autovec_copy(tOsVt[None, None, k_block], tOrVt[None, None, k_block])
+        cute.autovec_copy(
+            tOsP[None, None, 0],
+            tOrP[None, None, 0],
+        )
+        cute.autovec_copy(
+            tOsVt[None, None, 0],
+            tOrVt[None, None, 0],
+        )
+        for k_block in cutlass.range_constexpr(cute.size(tOsP.shape[2]), unroll_full=True):
+            next_k_block = k_block + 1
+            if cutlass.const_expr(next_k_block < cute.size(tOsP.shape[2])):
+                cute.autovec_copy(
+                    tOsP[None, None, next_k_block],
+                    tOrP[None, None, next_k_block],
+                )
+                cute.autovec_copy(
+                    tOsVt[None, None, next_k_block],
+                    tOrVt[None, None, next_k_block],
+                )
             cute.gemm(
                 tiled_mma,
                 acc_O,
@@ -241,35 +240,15 @@ def attention_kernel(
                 acc_O,
             )
 
+    cute.arch.cp_async_wait_group(0)
+
     for r in cutlass.range_constexpr(cute.size(row_sum)):
-        for offset in (4, 2, 1):
-            row_sum[r] += cute.arch.shuffle_sync_bfly(row_sum[r], offset)
         acc_O_mn[r, None] = acc_O_mn[r, None].load() / row_sum[r]
 
-    sO = sQ
-    taccOsO = thr_mma.partition_C(sO)
-    cute.autovec_copy(acc_O, taccOsO)
-    cute.arch.sync_threads()
-    gO = cute.local_tile(mO, (M_BLOCK_SIZE, head_dim_padded), (m_block, 0))
-    cO = cute.local_tile(
-        cute.make_identity_tensor(mO.shape), (M_BLOCK_SIZE, head_dim_padded), (m_block, 0)
-    )
-    gmem_tiled_copy_O = cute.make_tiled_copy_tv(
-        cute.make_copy_atom(cute.nvgpu.CopyUniversalOp(), cutlass.Float32, num_bits_per_copy=32),
-        copy_thread_layout,
-        copy_value_layout,
-    )
-    gmem_thr_copy_O = gmem_tiled_copy_O.get_slice(tidx)
-    tOsO = gmem_thr_copy_O.partition_S(sO)
-    tOgO = gmem_thr_copy_O.partition_D(gO)
-    tOcO = gmem_thr_copy_O.partition_D(cO)
-    tOpO = cute.make_rmem_tensor(tOcO.shape, cutlass.Boolean)
     for i in cutlass.range_constexpr(cute.size(tOcO)):
-        m, k = tOcO[i]
-        tOpO[i] = m < seqlen_q and k < head_dim
-    tOrO = cute.make_rmem_tensor(tOgO.shape, cutlass.Float32)
-    cute.autovec_copy(tOsO, tOrO)
-    cute.copy(gmem_tiled_copy_O, tOrO, tOgO, pred=tOpO)
+        m, n = tOcO[i]
+        if m < seqlen_q and n < head_dim:
+            tOgO[i] = acc_O[i]
 
 
 @cute.jit
@@ -283,5 +262,5 @@ def solve(
     d: cutlass.Int32,
 ):
     attention_kernel(Q, K, V, output, M, N, d).launch(
-        grid=[cute.ceil_div(M, M_BLOCK_SIZE), 1, 1], block=[NUM_THREADS, 1, 1]
+        grid=[cute.ceil_div(M, BM), 1, 1], block=[THREADS, 1, 1]
     )
