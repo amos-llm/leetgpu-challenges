@@ -13,10 +13,15 @@ def make_copy_predicate(
     seqlen: cutlass.Int32,
     head_dim: cutlass.Int32,
 ):
-    pred = cute.make_rmem_tensor_like(coords, cutlass.Boolean)
-    for i in cutlass.range_constexpr(cute.size(coords)):
-        m, n = coords[i]
-        pred[i] = m < seqlen and n < head_dim
+    pred = cute.make_rmem_tensor(
+        (coords.shape[0][1], cute.size(coords, mode=[1]), cute.size(coords, mode=[2])),
+        cutlass.Boolean,
+    )
+    for v in cutlass.range_constexpr(pred.shape[0]):
+        for mn in cutlass.range_constexpr(pred.shape[1]):
+            for k in cutlass.range_constexpr(pred.shape[2]):
+                coord = coords[(0, v), mn, k]
+                pred[v, mn, k] = coord[0] < seqlen and coord[1] < head_dim
     return pred
 
 
@@ -55,15 +60,31 @@ def attention_kernel(
     )
 
     gQ = cute.local_tile(mQ, (BM, head_dim_pad), (m_block, 0))
-    cQ = cute.local_tile(cute.make_identity_tensor(mQ.shape), (BM, head_dim_pad), (m_block, 0))
+    cQ = cute.local_tile(
+        cute.make_identity_tensor(mQ.shape),
+        (BM, head_dim_pad),
+        (m_block, 0),
+    )
     gK = cute.local_tile(mK, (BN, head_dim_pad), (None, 0))
     gV = cute.local_tile(mV, (BN, head_dim_pad), (None, 0))
-    cKV = cute.local_tile(cute.make_identity_tensor(mK.shape), (BN, head_dim_pad), (None, 0))
+    cKV = cute.local_tile(
+        cute.make_identity_tensor(mK.shape),
+        (BN, head_dim_pad),
+        (None, 0),
+    )
     gO = cute.local_tile(mO, (BM, head_dim_pad), (m_block, 0))
-    cO = cute.local_tile(cute.make_identity_tensor(mO.shape), (BM, head_dim_pad), (m_block, 0))
+    cO = cute.local_tile(
+        cute.make_identity_tensor(mO.shape),
+        (BM, head_dim_pad),
+        (m_block, 0),
+    )
 
     tiled_copy = cute.make_tiled_copy_tv(
-        cute.make_copy_atom(cute.nvgpu.cpasync.CopyG2SOp(), cutlass.Float32, num_bits_per_copy=32),
+        cute.make_copy_atom(
+            cute.nvgpu.cpasync.CopyG2SOp(),
+            cutlass.Float32,
+            num_bits_per_copy=32,
+        ),
         cute.make_layout((4, 32), stride=(32, 1)),
         cute.make_layout((1, 1)),
     )
@@ -106,8 +127,7 @@ def attention_kernel(
     acc_O_mn = acc_O[0, None, None]
     acc_O.fill(0.0)
 
-    num_rows = cute.size(acc_S_mn.shape[0])
-    row_max = cute.make_rmem_tensor((num_rows,), cutlass.Float32)
+    row_max = cute.make_rmem_tensor((cute.size(acc_S_mn.shape[0]),), cutlass.Float32)
     row_max.fill(-cutlass.Float32.inf)
     row_sum = cute.make_rmem_tensor_like(row_max)
     row_sum.fill(0.0)
