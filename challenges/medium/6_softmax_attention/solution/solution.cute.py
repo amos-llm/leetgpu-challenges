@@ -26,13 +26,13 @@ def attention_kernel(
     mK: cute.Tensor,
     mV: cute.Tensor,
     mO: cute.Tensor,
-    seqlen_q: cutlass.Int32,
-    seqlen_k: cutlass.Int32,
-    head_dim: cutlass.Int32,
 ):
     tidx, _, _ = cute.arch.thread_idx()
     m_block, _, _ = cute.arch.block_idx()
-    head_dim_pad = cute.ceil_div(mQ.shape[1], 32) * 32
+    seqlen_q = mQ.shape[0]
+    seqlen_k = mK.shape[0]
+    head_dim = mQ.shape[1]
+    head_dim_pad = cute.ceil_div(head_dim, 32) * 32
     scale_log2 = cute.math.rsqrt(cutlass.Float32(head_dim), fastmath=True) * LOG2E
 
     smem = cutlass.utils.SmemAllocator()
@@ -261,6 +261,7 @@ def solve(
     N: cutlass.Int32,
     d: cutlass.Int32,
 ):
-    attention_kernel(Q, K, V, output, M, N, d).launch(
-        grid=[cute.ceil_div(M, BM), 1, 1], block=[THREADS, 1, 1]
+    attention_kernel(Q, K, V, output).launch(
+        grid=[cute.ceil_div(M, BM), 1, 1],
+        block=[THREADS, 1, 1],
     )
