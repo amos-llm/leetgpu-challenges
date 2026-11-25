@@ -54,12 +54,19 @@ def attention_kernel(
         cute.make_layout((BM, BN), stride=(BN, 1)),
     )
 
+    gQ = cute.local_tile(mQ, (BM, head_dim_pad), (m_block, 0))
+    cQ = cute.local_tile(cute.make_identity_tensor(mQ.shape), (BM, head_dim_pad), (m_block, 0))
+    gK = cute.local_tile(mK, (BN, head_dim_pad), (None, 0))
+    gV = cute.local_tile(mV, (BN, head_dim_pad), (None, 0))
+    cKV = cute.local_tile(cute.make_identity_tensor(mK.shape), (BN, head_dim_pad), (None, 0))
+    gO = cute.local_tile(mO, (BM, head_dim_pad), (m_block, 0))
+    cO = cute.local_tile(cute.make_identity_tensor(mO.shape), (BM, head_dim_pad), (m_block, 0))
+
     tiled_copy = cute.make_tiled_copy_tv(
         cute.make_copy_atom(cute.nvgpu.cpasync.CopyG2SOp(), cutlass.Float32, num_bits_per_copy=32),
         cute.make_layout((4, 32), stride=(32, 1)),
         cute.make_layout((1, 1)),
     )
-    thr_copy = tiled_copy.get_slice(tidx)
     tiled_mma = cute.make_tiled_mma(
         cute.make_mma_atom(cute.nvgpu.MmaUniversalOp(cutlass.Float32)),
         cute.make_layout(
@@ -67,38 +74,37 @@ def attention_kernel(
             stride=(THREADS // BM, 1, 0),
         ),
     )
+    thr_copy = tiled_copy.get_slice(tidx)
     thr_mma = tiled_mma.get_slice(tidx)
 
+    tQgQ = thr_copy.partition_S(gQ)
+    tQcQ = thr_copy.partition_S(cQ)
     tQsQ = thr_copy.partition_D(sQ)
+    tKgK = thr_copy.partition_S(gK)
+    tKVcKV = thr_copy.partition_S(cKV)
     tKsK = thr_copy.partition_D(sK)
+    tVgV = thr_copy.partition_S(gV)
     tVsV = thr_copy.partition_D(sV)
-    tQsQ.fill(0.0)
-    tKsK.fill(0.0)
-    tVsV.fill(0.0)
 
     tSsQ = thr_mma.partition_A(sQ)
     tSrQ = thr_mma.make_fragment_A(tSsQ)
     tSsK = thr_mma.partition_B(sK)
     tSrK = thr_mma.make_fragment_B(tSsK)
+    acc_S = cute.make_rmem_tensor(thr_mma.partition_shape_C((BM, BN)), cutlass.Float32)
+    acc_S_mn = acc_S[0, None, None]
+    tScS_mn = thr_mma.partition_C(cute.make_identity_tensor((BM, BN)))[0, None, None]
+    acc_S.fill(0.0)
 
     tSsP = thr_mma.partition_C(sP)
     tOsP = thr_mma.partition_A(sP)
     tOrP = thr_mma.make_fragment_A(tOsP)
     tOsVt = thr_mma.partition_B(sVt)
     tOrVt = thr_mma.make_fragment_B(tOsVt)
-
-    gO = cute.local_tile(mO, (BM, head_dim_pad), (m_block, 0))
-    cO = cute.local_tile(cute.make_identity_tensor(mO.shape), (BM, head_dim_pad), (m_block, 0))
     tOgO = thr_mma.partition_C(gO)
     tOcO = thr_mma.partition_C(cO)
     acc_O = thr_mma.make_fragment_C(tOgO)
-    acc_O.fill(0.0)
     acc_O_mn = acc_O[0, None, None]
-
-    acc_S = cute.make_rmem_tensor(thr_mma.partition_shape_C((BM, BN)), cutlass.Float32)
-    acc_S.fill(0.0)
-    acc_S_mn = acc_S[0, None, None]
-    tScS_mn = thr_mma.partition_C(cute.make_identity_tensor((BM, BN)))[0, None, None]
+    acc_O.fill(0.0)
 
     num_rows = cute.size(acc_S_mn.shape[0])
     row_max = cute.make_rmem_tensor((num_rows,), cutlass.Float32)
@@ -106,16 +112,6 @@ def attention_kernel(
     row_sum = cute.make_rmem_tensor_like(row_max)
     row_sum.fill(0.0)
 
-    gQ = cute.local_tile(mQ, (BM, head_dim_pad), (m_block, 0))
-    cQ = cute.local_tile(cute.make_identity_tensor(mQ.shape), (BM, head_dim_pad), (m_block, 0))
-    gK = cute.local_tile(mK, (BN, head_dim_pad), (None, 0))
-    gV = cute.local_tile(mV, (BN, head_dim_pad), (None, 0))
-    cKV = cute.local_tile(cute.make_identity_tensor(mK.shape), (BN, head_dim_pad), (None, 0))
-    tQgQ = thr_copy.partition_S(gQ)
-    tQcQ = thr_copy.partition_S(cQ)
-    tKgK = thr_copy.partition_S(gK)
-    tVgV = thr_copy.partition_S(gV)
-    tKVcKV = thr_copy.partition_S(cKV)
     cute.copy(
         tiled_copy,
         tQgQ,
