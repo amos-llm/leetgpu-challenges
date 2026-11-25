@@ -15,12 +15,10 @@ OUTPUT_DIR = ROOT / "site"
 
 FRAMEWORKS = [
     ("CUDA", ".cu", "cpp"),
-    ("CUTLASS", ".cutlass.cu", "cpp"),
     ("PyTorch", ".pytorch.py", "python"),
     ("Triton", ".triton.py", "python"),
     ("JAX", ".jax.py", "python"),
     ("CuTe", ".cute.py", "python"),
-    ("TileLang", ".tilelang.py", "python"),
     ("Mojo", ".mojo", "python"),
 ]
 
@@ -174,11 +172,7 @@ def get_framework_files(directory: Path) -> list[dict]:
         return []
     files = []
     for display_name, ext, lang in FRAMEWORKS:
-        if ext == ".cu":
-            # Exclude .cutlass.cu files from the CUDA glob
-            matched = [f for f in directory.glob(f"*{ext}") if not f.name.endswith(".cutlass.cu")]
-        else:
-            matched = list(directory.glob(f"*{ext}"))
+        matched = list(directory.glob(f"*{ext}"))
         if matched:
             content = matched[0].read_text()
             files.append(

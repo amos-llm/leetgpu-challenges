@@ -69,7 +69,7 @@ class Framework:
 
     name: str
     solution_file: str
-    kind: str  # "python" | "cute" | "cuda" | "cutlass"
+    kind: str  # "python" | "cute" | "cuda"
 
 
 FRAMEWORKS: Dict[str, Framework] = {
@@ -77,10 +77,8 @@ FRAMEWORKS: Dict[str, Framework] = {
     for f in (
         Framework("pytorch", "solution.pytorch.py", "python"),
         Framework("triton", "solution.triton.py", "python"),
-        Framework("tilelang", "solution.tilelang.py", "python"),
         Framework("cute", "solution.cute.py", "cute"),
         Framework("cuda", "solution.cu", "cuda"),
-        Framework("cutlass", "solution.cutlass.cu", "cutlass"),
     )
 }
 
@@ -419,12 +417,12 @@ _CTYPE_BUILDERS: Dict[Any, Callable[[Any], Any]] = {
 
 
 class CudaRunner(Runner):
-    """CUDA / CUTLASS solution: compile once, then call through ctypes."""
+    """CUDA solution: compile once, then call through ctypes."""
 
     def __init__(self, framework: Framework, solution: Path, challenge: Challenge):
         super().__init__(framework, solution, challenge)
         self.sig_map = challenge.instance.get_solve_signature()
-        library = compile_shared(solution, cutlass=framework.kind == "cutlass")
+        library = compile_shared(solution)
         self.lib = ctypes.CDLL(str(library))
 
     def run(self, case: Dict[str, Any]) -> Dict[str, Any]:
@@ -485,33 +483,19 @@ def _arch_flags() -> List[str]:
     return [f"-arch=sm_{major}{minor}"]
 
 
-def compile_shared(solution_cu: Path, cutlass: bool = False) -> Path:
+def compile_shared(solution_cu: Path) -> Path:
     """Compile a .cu solution into a shared library, cached by source content hash."""
     nvcc = find_nvcc()
 
-    label = "CUDA"
-    extra_flags: List[str] = []
-    cache_name = "run_local_cuda_cache"
-    if cutlass:
-        include = REPO_ROOT / "3rdparty" / "cutlass" / "include"
-        if not include.exists():
-            raise FileNotFoundError(
-                f"CUTLASS headers not found at {include}. "
-                "Run `git submodule update --init --recursive`."
-            )
-        label = "CUTLASS"
-        extra_flags = ["-I", str(include), "-I", str(include.parent)]
-        cache_name = "run_local_cutlass_cache"
-
     file_hash = hashlib.sha256(solution_cu.read_bytes()).hexdigest()[:16]
-    cache_dir = Path(tempfile.gettempdir()) / cache_name
+    cache_dir = Path(tempfile.gettempdir()) / "run_local_cuda_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     so_path = cache_dir / f"{solution_cu.stem}_{file_hash}.so"
     if so_path.exists():
-        logger.info("Using cached %s library: %s", label, so_path)
+        logger.info("Using cached CUDA library: %s", so_path)
         return so_path
 
-    logger.info("Compiling %s %s -> %s", label, solution_cu, so_path)
+    logger.info("Compiling CUDA %s -> %s", solution_cu, so_path)
     result = subprocess.run(
         [
             nvcc,
@@ -523,7 +507,6 @@ def compile_shared(solution_cu: Path, cutlass: bool = False) -> Path:
             "-o",
             str(so_path),
             str(solution_cu),
-            *extra_flags,
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -531,14 +514,14 @@ def compile_shared(solution_cu: Path, cutlass: bool = False) -> Path:
     )
     if result.returncode != 0:
         logger.error("nvcc failed:\n%s", result.stdout)
-        raise RuntimeError(f"Failed to compile {label} solution")
+        raise RuntimeError("Failed to compile CUDA solution")
     return so_path
 
 
 def make_runner(framework: Framework, solution: Path, challenge: Challenge) -> Runner:
     if framework.kind == "cute":
         return CuteRunner(framework, solution, challenge)
-    if framework.kind in ("cuda", "cutlass"):
+    if framework.kind == "cuda":
         return CudaRunner(framework, solution, challenge)
     return PythonRunner(framework, solution, challenge)
 
@@ -1117,8 +1100,8 @@ examples
 
 solutions
   A challenge runs only if <challenge>/solution/solution.<framework> exists,
-  e.g. solution.pytorch.py, solution.triton.py, solution.cute.py, solution.cu,
-  solution.cutlass.cu. Challenges without it are SKIPPED; with a single target
+  e.g. solution.pytorch.py, solution.triton.py, solution.cute.py, solution.cu.
+  Challenges without it are SKIPPED; with a single target
   a missing solution is an error instead.
 """,
     )
