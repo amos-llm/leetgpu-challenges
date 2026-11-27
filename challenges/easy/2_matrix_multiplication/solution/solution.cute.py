@@ -9,21 +9,6 @@ NUM_STAGES = 3
 
 
 @cute.jit
-def make_g2s_atom(dtype: cutlass.Constexpr, vector: cutlass.Constexpr):
-    return cute.make_copy_atom(
-        cute.nvgpu.cpasync.CopyG2SOp(
-            cache_mode=(
-                cute.nvgpu.cpasync.LoadCacheMode.GLOBAL
-                if vector == 4
-                else cute.nvgpu.cpasync.LoadCacheMode.ALWAYS
-            )
-        ),
-        dtype,
-        num_bits_per_copy=dtype.width * vector,
-    )
-
-
-@cute.jit
 def make_copy_predicates(coords: cute.Tensor, bound: cute.Int32):
     pred = cute.make_rmem_tensor(
         (
@@ -61,7 +46,11 @@ def gemm_kernel(
     ):
         a_vector = 4
     tiled_copy_A = cute.make_tiled_copy_tv(
-        make_g2s_atom(mA.element_type, a_vector),
+        cute.make_copy_atom(
+            cute.nvgpu.cpasync.CopyG2SOp(),
+            mA.element_type,
+            num_bits_per_copy=mA.element_type.width * a_vector,
+        ),
         cute.make_layout(
             (THREADS // BK * a_vector, BK // a_vector),
             stride=(BK // a_vector, 1),
@@ -77,7 +66,11 @@ def gemm_kernel(
     ):
         b_vector = 4
     tiled_copy_B = cute.make_tiled_copy_tv(
-        make_g2s_atom(mB.element_type, b_vector),
+        cute.make_copy_atom(
+            cute.nvgpu.cpasync.CopyG2SOp(),
+            mB.element_type,
+            num_bits_per_copy=mB.element_type.width * b_vector,
+        ),
         cute.make_layout((THREADS // BK, BK), stride=(1, THREADS // BK)),
         cute.make_layout((b_vector, 1)),
     )

@@ -39,29 +39,52 @@ def gemm_kernel(
     tidx, _, _ = cute.arch.thread_idx()
     bidx, bidy, _ = cute.arch.block_idx()
 
-    tiled_copy_g2s_A = cute.make_tiled_copy_tv(
-        cute.make_copy_atom(
-            cute.nvgpu.CopyUniversalOp(),
-            mA.element_type,
-            num_bits_per_copy=mA.element_type.width,
-        ),
-        cute.make_layout((8, 32), stride=(32, 1)),
-        cute.make_layout((1, 1)),
-    )
-    tiled_copy_g2s_B = cute.make_tiled_copy_tv(
-        cute.make_copy_atom(
-            cute.nvgpu.CopyUniversalOp(),
-            mB.element_type,
-            num_bits_per_copy=mB.element_type.width,
-        ),
-        cute.make_layout((32, 8), stride=(1, 32)),
-        cute.make_layout((1, 1)),
-    )
+    if cutlass.const_expr(mA.shape[1] % (128 // mA.element_type.width) == 0):
+        tiled_copy_g2s_A = cute.make_tiled_copy_tv(
+            cute.make_copy_atom(
+                cute.nvgpu.cpasync.CopyG2SOp(),
+                mA.element_type,
+                num_bits_per_copy=128,
+            ),
+            cute.make_layout((64, 4), stride=(4, 1)),
+            cute.make_layout((1, 8)),
+        )
+        tiled_copy_g2s_B = cute.make_tiled_copy_tv(
+            cute.make_copy_atom(
+                cute.nvgpu.cpasync.CopyG2SOp(),
+                mB.element_type,
+                num_bits_per_copy=128,
+            ),
+            cute.make_layout((8, 32), stride=(1, 8)),
+            cute.make_layout((8, 1)),
+        )
+    else:
+        tiled_copy_g2s_A = cute.make_tiled_copy_tv(
+            cute.make_copy_atom(
+                cute.nvgpu.CopyUniversalOp(),
+                mA.element_type,
+                num_bits_per_copy=mA.element_type.width,
+            ),
+            cute.make_layout((8, 32), stride=(32, 1)),
+            cute.make_layout((1, 1)),
+        )
+        tiled_copy_g2s_B = cute.make_tiled_copy_tv(
+            cute.make_copy_atom(
+                cute.nvgpu.CopyUniversalOp(),
+                mB.element_type,
+                num_bits_per_copy=mB.element_type.width,
+            ),
+            cute.make_layout((32, 8), stride=(1, 32)),
+            cute.make_layout((1, 1)),
+        )
     tiled_mma = cute.make_tiled_mma(
         cute.nvgpu.warp.MmaF16BF16Op(cute.Float16, cute.Float32, (16, 8, 16)),
         cute.make_layout((2, 4, 1)),
     )
 
+    residue_k = mA.shape[1] - cute.ceil_div(mA.shape[1], BK) * BK
+    mA = cute.domain_offset((0, residue_k), mA)
+    mB = cute.domain_offset((0, residue_k), mB)
     gA = cute.local_tile(mA, (BM, BK), (bidx, None))
     gB = cute.local_tile(mB, (BN, BK), (bidy, None))
     gC = cute.local_tile(mC, (BM, BN), (bidx, bidy))
@@ -69,9 +92,6 @@ def gemm_kernel(
     cB = cute.local_tile(cute.make_identity_tensor(mB.shape), (BN, BK), (bidy, None))
     cC = cute.local_tile(cute.make_identity_tensor(mC.shape), (BM, BN), (bidx, bidy))
 
-    residue_k = mA.shape[1] - gA.shape[2] * BK
-    gA = cute.domain_offset((0, residue_k, 0), gA)
-    gB = cute.domain_offset((0, residue_k, 0), gB)
     cA = cute.domain_offset((0, residue_k, 0), cA)
     cB = cute.domain_offset((0, residue_k, 0), cB)
 
@@ -145,6 +165,7 @@ def gemm_kernel(
         tBsB[None, None, None, 0],
         pred=tBpB_residue_k,
     )
+    cute.arch.cp_async_commit_group()
 
     num_k_tiles = gA.shape[2]
     for stage in cutlass.range_constexpr(1, NUM_STAGES - 1):
@@ -161,6 +182,7 @@ def gemm_kernel(
                 tBsB[None, None, None, stage],
                 pred=tBpB,
             )
+        cute.arch.cp_async_commit_group()
 
     smem_pipe_read = 0
     smem_pipe_write = NUM_STAGES - 1
@@ -180,6 +202,8 @@ def gemm_kernel(
                 tBsB[None, None, None, smem_pipe_write],
                 pred=tBpB,
             )
+        cute.arch.cp_async_commit_group()
+        cute.arch.cp_async_wait_group(NUM_STAGES - 1)
         cute.arch.sync_threads()
 
         num_k_blocks = cute.size(tCrA, mode=[2])
@@ -217,6 +241,8 @@ def gemm_kernel(
 
         smem_pipe_read = (smem_pipe_read + 1) % NUM_STAGES
         smem_pipe_write = (smem_pipe_write + 1) % NUM_STAGES
+
+    cute.arch.cp_async_wait_group(0)
 
     for i in range(cute.size(tCcC)):
         m, n = tCcC[i]
