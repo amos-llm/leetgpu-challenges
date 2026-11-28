@@ -5,7 +5,7 @@ BM = 128
 BN = 128
 BK = 32
 THREADS = 256
-NUM_STAGES = 3
+STAGES = 3
 
 
 @cute.jit
@@ -94,10 +94,10 @@ def gemm_kernel(
 
     smem = cutlass.utils.SmemAllocator()
     sA = smem.allocate_tensor(
-        mA.element_type, cute.make_layout((BM, BK, NUM_STAGES), stride=(BK, 1, BM * BK))
+        mA.element_type, cute.make_layout((BM, BK, STAGES), stride=(BK, 1, BM * BK))
     )
     sB = smem.allocate_tensor(
-        mB.element_type, cute.make_layout((BN, BK, NUM_STAGES), stride=(1, BN, BN * BK))
+        mB.element_type, cute.make_layout((BN, BK, STAGES), stride=(1, BN, BN * BK))
     )
 
     thr_copy_A = tiled_copy_A.get_slice(tidx)
@@ -139,10 +139,10 @@ def gemm_kernel(
     cute.arch.cp_async_commit_group()
 
     smem_pipe_read = 0
-    smem_pipe_write = NUM_STAGES - 1
+    smem_pipe_write = STAGES - 1
 
     num_k_tiles = cute.size(gA, mode=[2])
-    for stage in cutlass.range_constexpr(1, NUM_STAGES - 1):
+    for stage in cutlass.range_constexpr(1, STAGES - 1):
         if stage < num_k_tiles:
             cute.copy(
                 thr_copy_A,
@@ -159,7 +159,7 @@ def gemm_kernel(
         cute.arch.cp_async_commit_group()
 
     for k_tile in range(num_k_tiles):
-        next_k_tile = k_tile + NUM_STAGES - 1
+        next_k_tile = k_tile + STAGES - 1
         if next_k_tile < num_k_tiles:
             cute.copy(
                 tiled_copy_A,
@@ -174,7 +174,7 @@ def gemm_kernel(
                 pred=tBpB,
             )
         cute.arch.cp_async_commit_group()
-        cute.arch.cp_async_wait_group(NUM_STAGES - 1)
+        cute.arch.cp_async_wait_group(STAGES - 1)
         cute.arch.sync_threads()
 
         cute.autovec_copy(tCsA[None, None, 0, smem_pipe_read], tCrA[None, None, 0])
@@ -200,8 +200,8 @@ def gemm_kernel(
             )
         cute.arch.sync_threads()
 
-        smem_pipe_read = (smem_pipe_read + 1) % NUM_STAGES
-        smem_pipe_write = (smem_pipe_write + 1) % NUM_STAGES
+        smem_pipe_read = (smem_pipe_read + 1) % STAGES
+        smem_pipe_write = (smem_pipe_write + 1) % STAGES
 
     cute.arch.cp_async_wait_group(0)
 
